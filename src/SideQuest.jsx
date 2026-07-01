@@ -202,80 +202,75 @@ function buildFallbackLore(src) {
 }
 
 // ---------------------------------------------------------------------------
-// CLAUDE (Anthropic API) — LIVE
+// LORE (Anthropic, via our backend) — LIVE when VITE_API_BASE is configured
 // ---------------------------------------------------------------------------
+// The Anthropic key must never ship in the browser, so lore now goes through
+// the server in server/index.mjs. Set VITE_API_BASE to that server's URL to
+// enable it; with no backend, these throw and runGeneration falls back to the
+// theme-adaptive baked deck.
 
-async function callClaude(prompt, { json = false, maxTokens = 1200 } = {}) {
-  const sys = json
-    ? "You respond ONLY with valid minified JSON. No markdown, no code fences, no preamble."
-    : "";
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+const API_BASE = (import.meta.env && import.meta.env.VITE_API_BASE) || "";
+const AI_ENABLED = !!API_BASE;
+
+async function postJSON(pathname, body) {
+  const res = await fetch(`${API_BASE}${pathname}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: maxTokens,
-      messages: [{ role: "user", content: (sys ? sys + "\n\n" : "") + prompt }],
-    }),
+    body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error("Claude API error " + res.status);
-  const data = await res.json();
-  const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
-  if (!json) return text.trim();
-  const clean = text.replace(/```json/gi, "").replace(/```/g, "").trim();
-  return JSON.parse(clean);
+  if (!res.ok) {
+    let msg = `${pathname} ${res.status}`;
+    try { const d = await res.json(); if (d.error) msg = d.error; } catch (e) { /* ignore */ }
+    throw new Error(msg);
+  }
+  return res.json();
 }
 
 async function generateDeckLore({ eventType, theme, questPrompt, participants }) {
-  const ev = EVENT_TYPES.find((e) => e.id === eventType)?.label || eventType;
-  const th = THEMES.find((t) => t.id === theme)?.label || theme;
-  const names = participants.map((p) => p.name || "Unnamed").join(", ");
-  const prompt = `You are the loremaster for "Side Quest", which turns real events into playable card-game quests in the style of Magic: The Gathering cards.
-
-EVENT TYPE: ${ev}
-THEME / FEELING: ${th}
-ORGANIZER'S QUEST GOAL: "${questPrompt}"
-PARTICIPANTS (use these exact real names): ${names}
-
-For EACH participant invent a playable character card matching the theme's tone. Fun, a little roasty but warm, PG-13. Each card needs:
-- "realName": exact participant name
-- "title": epic character title fitting the theme
-- "typeLine": MTG-style type line (e.g. "Legendary Creature — Reveler Rogue")
-- "cost": 1-7 integer
-- "power": 0-9 integer
-- "toughness": 0-9 integer
-- "ability": one short rules-style ability tied to the EVENT (1 sentence)
-- "flavor": one flavor quote, max 18 words, personal and funny
-- "frame": one of "gold","azure","crimson","verdant","violet"
-
-ALSO invent ONE overarching "questCard": {"title","typeLine":"Quest","ability"(2 sentences, the group win condition),"flavor"}.
-
-Return ONLY JSON: {"questCard":{...},"cards":[{...}]}. cards length MUST equal participant count, same order.`;
-  return callClaude(prompt, { json: true, maxTokens: 2500 });
+  if (!API_BASE) throw new Error("no backend configured"); // -> themed fallback deck
+  const lore = await postJSON("/api/generate-lore", {
+    eventType: EVENT_TYPES.find((e) => e.id === eventType)?.label || eventType,
+    theme: THEMES.find((t) => t.id === theme)?.label || theme,
+    questPrompt,
+    participants: participants.map((p) => ({ name: p.name || "Unnamed" })),
+  });
+  if (!lore || !Array.isArray(lore.cards) || !lore.cards.length) throw new Error("empty lore");
+  return lore;
 }
 
 async function regenerateOneCard({ eventType, theme, questPrompt, card }) {
-  const ev = EVENT_TYPES.find((e) => e.id === eventType)?.label || eventType;
-  const th = THEMES.find((t) => t.id === theme)?.label || theme;
-  const prompt = `Reinvent ONE Side Quest character card with a fresh, different take. Event: ${ev}. Theme: ${th}. Group goal: "${questPrompt}". Keep realName="${card.realName}" exactly. JSON shape: {"realName","title","typeLine","cost","power","toughness","ability","flavor","frame"}. Make it noticeably different from previous: title "${card.title}", ability "${card.ability}". Return ONLY the JSON object.`;
-  return callClaude(prompt, { json: true, maxTokens: 700 });
+  if (!API_BASE) throw new Error("no backend configured");
+  return postJSON("/api/regenerate-lore", {
+    eventType: EVENT_TYPES.find((e) => e.id === eventType)?.label || eventType,
+    theme: THEMES.find((t) => t.id === theme)?.label || theme,
+    questPrompt,
+    card,
+  });
 }
 
 // ---------------------------------------------------------------------------
-// NANO-BANANA (image) — STUBBED, SWAPPABLE
+// NANO-BANANA (image) — LIVE via backend when VITE_API_BASE is set, else stub
 // ---------------------------------------------------------------------------
-/*
-  NANO-BANANA INTEGRATION POINT
-  Replace generateCardArt()'s body with a call to YOUR backend, which calls
-  Google Gemini 2.5 Flash Image. Recommended:
-    POST https://your-backend/api/generate-art
-    body: { photoBase64, prompt, themeStyle, refineNote }
-    -> server holds GOOGLE_API_KEY, returns an image URL.
-  Stubbed here because artifacts can't reach Google and keys can't be client side.
-*/
-async function generateCardArt({ photoBase64, frameAccent, themeStyle, seedStr }) {
-  await new Promise((r) => setTimeout(r, 500 + Math.random() * 500));
-  const svg = makeThemedArt(seedStr, frameAccent, themeStyle, photoBase64);
+// With a backend configured AND a photo present, the server calls Gemini
+// ("nano-banana") to turn the real face into a themed character portrait.
+// Otherwise we return a procedural themed backdrop and the card layers the raw
+// photo on top (see GameCard) — no Google key ever touches the browser.
+async function generateCardArt({ photoBase64, frameAccent, themeStyle, seedStr, lore }) {
+  if (API_BASE && photoBase64) {
+    try {
+      const d = await postJSON("/api/generate-art", {
+        photoBase64,
+        themeStyle,
+        lore: { title: lore?.title, typeLine: lore?.typeLine },
+      });
+      if (d && d.image) return d.image;
+      throw new Error("no image");
+    } catch (e) {
+      console.warn("Backend art failed, using procedural backdrop:", e.message);
+    }
+  }
+  await new Promise((r) => setTimeout(r, 300 + Math.random() * 400));
+  const svg = makeThemedArt(seedStr, frameAccent, themeStyle, null);
   return "data:image/svg+xml;base64," + btoa(unescape(encodeURIComponent(svg)));
 }
 
@@ -553,6 +548,7 @@ export default function SideQuest() {
   const [error, setError] = useState("");
   const [busyCard, setBusyCard] = useState(null);
   const [orderPlaced, setOrderPlaced] = useState(false);
+  const [photoConsent, setPhotoConsent] = useState(false);
 
   // ---- persistence ----
   const [savedDecks, setSavedDecks] = useState([]); // [{id,name,theme,eventType,count,updatedAt}]
@@ -624,7 +620,7 @@ export default function SideQuest() {
   function newDeck() {
     setCurrentDeckId(null); setUser({ name: "", email: "" }); setEventType(null);
     setTheme(null); setQuestPrompt(""); setParticipants([]); setQuestCard(null);
-    setCards([]); setArts({}); setFlipped({}); setGenState("idle"); setOrderPlaced(false);
+    setCards([]); setArts({}); setFlipped({}); setGenState("idle"); setOrderPlaced(false); setPhotoConsent(false);
     setShowDecks(false); setLanding(false); setStep(0);
   }
 
@@ -672,12 +668,13 @@ export default function SideQuest() {
       ordered.forEach((c, i) => setTimeout(() => setFlipped((s) => ({ ...s, [c.uid]: true })), 250 + i * 320));
       // ...but paint every card's art in parallel so a large cast isn't stuck in a slow queue.
       await Promise.all(ordered.map(async (c) => {
+        const part = src.participants.find((p) => p.id === c.pid);
         setLoadingArt((s) => ({ ...s, [c.uid]: true }));
         try {
           const frAccent = (CARD_FRAMES.find((f) => f.key === c.frame) || CARD_FRAMES[0]).accent;
-          // Backdrop only — the uploaded face is layered as a real <img> in the card.
-          // (True face->character stylization is the backend image model's job.)
-          const art = await generateCardArt({ photoBase64: null, frameAccent: frAccent, themeStyle: th.style, seedStr: c.realName + c.title });
+          // With a backend + photo -> real face->character art; otherwise a themed
+          // backdrop the card layers the raw photo over.
+          const art = await generateCardArt({ photoBase64: part?.photo || null, frameAccent: frAccent, themeStyle: th.style, seedStr: c.realName + c.title, lore: c });
           setArts((s) => ({ ...s, [c.uid]: art }));
         } finally {
           setLoadingArt((s) => ({ ...s, [c.uid]: false }));
@@ -728,8 +725,9 @@ export default function SideQuest() {
     setBusyCard(uid); setLoadingArt((s) => ({ ...s, [uid]: true }));
     try {
       const card = cards.find((c) => c.uid === uid);
+      const part = participants.find((p) => p.id === card.pid);
       const frAccent = (CARD_FRAMES.find((f) => f.key === card.frame) || CARD_FRAMES[0]).accent;
-      const art = await generateCardArt({ photoBase64: null, frameAccent: frAccent, themeStyle: themeObj.style, seedStr: card.realName + card.title + Math.random() });
+      const art = await generateCardArt({ photoBase64: part?.photo || null, frameAccent: frAccent, themeStyle: themeObj.style, seedStr: card.realName + card.title + Math.random(), lore: card });
       setArts((s) => ({ ...s, [uid]: art }));
     } catch (e) { setError(e.message); } finally { setLoadingArt((s) => ({ ...s, [uid]: false })); setBusyCard(null); }
   }
@@ -738,7 +736,8 @@ export default function SideQuest() {
     0: !!eventType,
     1: !!theme,
     2: questPrompt.trim().length > 8,
-    3: participants.length > 0 && participants.every((p) => p.name.trim()),
+    3: participants.length > 0 && participants.every((p) => p.name.trim()) &&
+       (!participants.some((p) => p.photo) || photoConsent),
   };
 
   // ===== LANDING =====
@@ -870,6 +869,12 @@ export default function SideQuest() {
               ))}
             </div>
             <GhostButton onClick={addParticipant} style={{ marginTop: 14, width: "100%" }}>＋ Add participant</GhostButton>
+            {participants.some((p) => p.photo) && (
+              <label style={{ display: "flex", gap: 9, alignItems: "flex-start", marginTop: 16, fontSize: 13, color: "#c8c8d4", lineHeight: 1.4, cursor: "pointer" }}>
+                <input type="checkbox" checked={photoConsent} onChange={(e) => setPhotoConsent(e.target.checked)} style={{ marginTop: 2, flexShrink: 0 }} />
+                <span>I confirm I have permission from everyone whose photo I uploaded to use their likeness to generate character art.</span>
+              </label>
+            )}
             <NavRow onBack={() => setStep(2)} onNext={() => runGeneration()} nextOk={canNext[3]} nextLabel="✦ Generate deck" />
           </Panel>
         )}
@@ -901,9 +906,9 @@ export default function SideQuest() {
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(232px, 1fr))", gap: 26, justifyItems: "center", marginTop: 18 }}>
                   {cards.map((c) => (
                     <GameCard key={c.uid} card={c} theme={themeObj} art={arts[c.uid]} loadingArt={loadingArt[c.uid]}
-                      photo={(participants.find((p) => p.id === c.pid) || {}).photo || null}
+                      photo={AI_ENABLED ? null : ((participants.find((p) => p.id === c.pid) || {}).photo || null)}
                       flipped={!!flipped[c.uid]} onFlip={() => setFlipped((s) => ({ ...s, [c.uid]: !s[c.uid] }))}
-                      compact busy={busyCard === c.uid} onRegenLore={() => regenLore(c.uid)} onRegenArt={() => regenArt(c.uid)} />
+                      compact busy={busyCard === c.uid} onRegenLore={AI_ENABLED ? () => regenLore(c.uid) : undefined} onRegenArt={() => regenArt(c.uid)} />
                   ))}
                 </div>
               </>
@@ -924,7 +929,7 @@ export default function SideQuest() {
               <div style={{ display: "flex" }}>
                 {cards.slice(0, 3).map((c, i) => (
                   <div key={c.uid} style={{ transform: `rotate(${(i - 1) * 8}deg) translateX(${(i - 1) * -26}px)`, zIndex: i }}>
-                    <GameCard card={c} theme={themeObj} art={arts[c.uid]} photo={(participants.find((p) => p.id === c.pid) || {}).photo || null} flipped compact />
+                    <GameCard card={c} theme={themeObj} art={arts[c.uid]} photo={AI_ENABLED ? null : ((participants.find((p) => p.id === c.pid) || {}).photo || null)} flipped compact />
                   </div>
                 ))}
               </div>

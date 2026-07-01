@@ -32,6 +32,25 @@ The `dist/` folder is what you deploy to any static host (Netlify, Vercel, Cloud
 
 ---
 
+## Live AI backend (lore + face→character art)
+
+By default the app runs in **offline demo mode**: theme-adaptive fallback decks and procedural art, no keys needed. To turn on **real AI** — Claude writes the lore, and Gemini ("nano-banana") turns each uploaded face into a themed character portrait — run the small backend in `server/`.
+
+The backend holds the API keys so they never ship in the browser. It's dependency-free (Node 18+ built-in `http` + `fetch`).
+
+```bash
+cp .env.example .env      # then fill in ANTHROPIC_API_KEY and GOOGLE_API_KEY
+npm run server            # starts the backend on http://localhost:8787
+```
+
+Point the frontend at it by setting `VITE_API_BASE=http://localhost:8787` in `.env`, then run `npm run dev` in a second terminal. Check the backend is healthy at http://localhost:8787/api/health.
+
+- Endpoints: `POST /api/generate-lore`, `POST /api/regenerate-lore`, `POST /api/generate-art`, `GET /api/health`.
+- With no `VITE_API_BASE` set (e.g. the static GitHub Pages build), the app stays in offline demo mode — nothing breaks.
+- The backend is stateless (no DB/auth yet). Accounts, persistence, checkout, and fulfillment are the remaining slices in [`docs/SideQuest_Backend_Spec.md`](./docs/SideQuest_Backend_Spec.md).
+
+---
+
 ## Keep building with Claude Code
 
 This project is set up to continue in [Claude Code](https://docs.claude.com/en/docs/claude-code). From this folder:
@@ -71,17 +90,21 @@ sidequest/
 
 ---
 
-## The two integration seams
+## What's built vs. what's next
 
-Search `SideQuest.jsx` for these comments — they mark where the demo becomes the real product:
+Done:
 
-- **`NANO-BANANA INTEGRATION POINT`** in `generateCardArt()` — swap the placeholder SVG for a call to your backend that runs Google Gemini 2.5 Flash Image.
-- **`callClaude` / `generateDeckLore`** — currently calls Anthropic directly. Move this behind your own backend so the API key never ships in browser code. See the backend spec.
+- **Lore** — `generateDeckLore()` / `regenerateOneCard()` call the backend (`/api/generate-lore`, `/api/regenerate-lore`), which talks to Claude with the key held server-side.
+- **Face→character art** — `generateCardArt()` calls `/api/generate-art`, which runs Gemini ("nano-banana") on the uploaded photo. Without a backend, it returns a themed backdrop and the card layers the raw photo on top.
+- **Order** — the checkout step is an in-app confirmation panel (no more `alert()`), ready to be wired to Stripe.
 
-The "Order deck" button is a placeholder `alert()`; wiring it to Stripe + print-on-demand is detailed in the checkout flow doc.
+Next (see the specs in `docs/`):
+
+- **Accounts + server-side persistence** — replace the `window.storage` localStorage shim with the decks API.
+- **Checkout + fulfillment** — Stripe payment, print-ready PDF, print-on-demand handoff (`SideQuest_Checkout_Flow.md`).
 
 ---
 
-## A note on the API key
+## A note on the API keys
 
-Do **not** put an Anthropic or Google key into the front-end code. The current direct-to-Anthropic call is a demo convenience only. For anything real, the key belongs on a backend server, which the front end calls. `.env.example` shows the shape; `.env` is gitignored so you don't commit secrets.
+Never put an Anthropic or Google key into front-end code. The keys live only in the backend's `.env` (gitignored). The browser calls the backend; the backend calls the AI providers. `.env.example` documents every variable.
