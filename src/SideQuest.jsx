@@ -411,7 +411,7 @@ function GhostButton({ children, onClick, style }) {
 // THEME-ADAPTIVE FLIP CARD
 // ---------------------------------------------------------------------------
 
-function GameCard({ card, theme, art, loadingArt, flipped, onFlip, onRegenLore, onRegenArt, busy, compact }) {
+function GameCard({ card, theme, art, photo, loadingArt, flipped, onFlip, onRegenLore, onRegenArt, busy, compact }) {
   const fr = CARD_FRAMES.find((f) => f.key === card.frame) || CARD_FRAMES[0];
   const t = theme;
   const W = compact ? 232 : 300;
@@ -477,8 +477,15 @@ function GameCard({ card, theme, art, loadingArt, flipped, onFlip, onRegenLore, 
                 <div className="ql-spin" style={{ width: 24, height: 24, borderColor: `${fr.accent}55`, borderTopColor: fr.accent }} />
                 conjuring art…
               </div>
-            ) : art ? (
-              <img src={art} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+            ) : (art || photo) ? (
+              <>
+                {/* themed backdrop */}
+                {art && <img src={art} alt="" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }} />}
+                {/* the participant's real face, layered as its own <img> so it always paints */}
+                {photo && <img src={photo} alt={card.realName} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }} />}
+                {/* theme tint so the portrait blends into the card frame */}
+                {photo && <div style={{ position: "absolute", inset: 0, pointerEvents: "none", background: `radial-gradient(120% 80% at 50% 18%, ${fr.accent}22, transparent 55%), linear-gradient(180deg, transparent 45%, ${t.bg[0]}dd 100%)` }} />}
+              </>
             ) : (
               <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: `${fr.accent}99`, fontFamily: UI_FONT, fontSize: 11 }}>no art</div>
             )}
@@ -664,12 +671,13 @@ export default function SideQuest() {
       // Flips stay on a fixed, staggered timeline for drama...
       ordered.forEach((c, i) => setTimeout(() => setFlipped((s) => ({ ...s, [c.uid]: true })), 250 + i * 320));
       // ...but paint every card's art in parallel so a large cast isn't stuck in a slow queue.
-      await Promise.all(ordered.map(async (c, i) => {
-        const part = src.participants.find((p) => p.id === c.pid) || src.participants[i];
+      await Promise.all(ordered.map(async (c) => {
         setLoadingArt((s) => ({ ...s, [c.uid]: true }));
         try {
           const frAccent = (CARD_FRAMES.find((f) => f.key === c.frame) || CARD_FRAMES[0]).accent;
-          const art = await generateCardArt({ photoBase64: part?.photo || null, frameAccent: frAccent, themeStyle: th.style, seedStr: c.realName + c.title });
+          // Backdrop only — the uploaded face is layered as a real <img> in the card.
+          // (True face->character stylization is the backend image model's job.)
+          const art = await generateCardArt({ photoBase64: null, frameAccent: frAccent, themeStyle: th.style, seedStr: c.realName + c.title });
           setArts((s) => ({ ...s, [c.uid]: art }));
         } finally {
           setLoadingArt((s) => ({ ...s, [c.uid]: false }));
@@ -720,9 +728,8 @@ export default function SideQuest() {
     setBusyCard(uid); setLoadingArt((s) => ({ ...s, [uid]: true }));
     try {
       const card = cards.find((c) => c.uid === uid);
-      const part = participants.find((p) => p.id === card.pid);
       const frAccent = (CARD_FRAMES.find((f) => f.key === card.frame) || CARD_FRAMES[0]).accent;
-      const art = await generateCardArt({ photoBase64: part?.photo || null, frameAccent: frAccent, themeStyle: themeObj.style, seedStr: card.realName + card.title + Math.random() });
+      const art = await generateCardArt({ photoBase64: null, frameAccent: frAccent, themeStyle: themeObj.style, seedStr: card.realName + card.title + Math.random() });
       setArts((s) => ({ ...s, [uid]: art }));
     } catch (e) { setError(e.message); } finally { setLoadingArt((s) => ({ ...s, [uid]: false })); setBusyCard(null); }
   }
@@ -836,16 +843,29 @@ export default function SideQuest() {
 
         {/* STEP 3: CAST */}
         {step === 3 && (
-          <Panel title="Add your cast" sub="Each person becomes a card. Add a name and a photo.">
+          <Panel title="Add your cast" sub="Each guest becomes a character card. Add their name and a clear face photo — it becomes the card's portrait.">
+            <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", marginBottom: 16, borderRadius: 10, border: "1px solid #33333e", background: "rgba(243,207,91,0.05)", color: "#c8c8d4", fontSize: 13, lineHeight: 1.4 }}>
+              <span style={{ fontSize: 18 }}>📸</span>
+              <span>Upload a front-facing photo for each person — a visible face works best, and each one becomes that hero's portrait.</span>
+            </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
               {participants.map((p) => (
                 <div key={p.id} className="ql-fade" style={{ display: "flex", gap: 12, alignItems: "center", padding: 12, borderRadius: 12, border: "1px solid #33333e", background: "rgba(255,255,255,0.02)" }}>
-                  <label style={{ width: 56, height: 56, borderRadius: 10, flexShrink: 0, overflow: "hidden", cursor: "pointer", border: "1px dashed #555", display: "flex", alignItems: "center", justifyContent: "center", background: p.photo ? "transparent" : "rgba(255,255,255,0.03)" }}>
-                    {p.photo ? <img src={p.photo} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span style={{ color: "#777", fontSize: 22 }}>＋</span>}
+                  <label title="Upload a face photo" style={{ position: "relative", width: 64, height: 64, borderRadius: 12, flexShrink: 0, overflow: "hidden", cursor: "pointer", border: p.photo ? "1px solid #33333e" : "1px dashed #66667a", display: "flex", alignItems: "center", justifyContent: "center", background: p.photo ? "transparent" : "rgba(255,255,255,0.03)" }}>
+                    {p.photo ? (
+                      <>
+                        <img src={p.photo} alt={p.name || "participant"} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                        <span style={{ position: "absolute", bottom: 0, left: 0, right: 0, fontSize: 9, textAlign: "center", padding: "1px 0", background: "rgba(0,0,0,0.55)", color: "#f3cf5b" }}>change</span>
+                      </>
+                    ) : (
+                      <span style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, color: "#8a8a9a", fontSize: 10 }}>
+                        <span style={{ fontSize: 20 }}>＋</span>photo
+                      </span>
+                    )}
                     <input type="file" accept="image/*" style={{ display: "none" }} onChange={(e) => e.target.files[0] && onPhoto(p.id, e.target.files[0])} />
                   </label>
                   <input value={p.name} onChange={(e) => updateParticipant(p.id, { name: e.target.value })} placeholder="Name" style={{ ...inputStyle, flex: 1, margin: 0 }} />
-                  <button onClick={() => removeParticipant(p.id)} style={{ background: "none", border: "none", color: "#888", cursor: "pointer", fontSize: 20 }}>✕</button>
+                  <button onClick={() => removeParticipant(p.id)} title="Remove" style={{ background: "none", border: "none", color: "#888", cursor: "pointer", fontSize: 20 }}>✕</button>
                 </div>
               ))}
             </div>
@@ -881,6 +901,7 @@ export default function SideQuest() {
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(232px, 1fr))", gap: 26, justifyItems: "center", marginTop: 18 }}>
                   {cards.map((c) => (
                     <GameCard key={c.uid} card={c} theme={themeObj} art={arts[c.uid]} loadingArt={loadingArt[c.uid]}
+                      photo={(participants.find((p) => p.id === c.pid) || {}).photo || null}
                       flipped={!!flipped[c.uid]} onFlip={() => setFlipped((s) => ({ ...s, [c.uid]: !s[c.uid] }))}
                       compact busy={busyCard === c.uid} onRegenLore={() => regenLore(c.uid)} onRegenArt={() => regenArt(c.uid)} />
                   ))}
@@ -903,7 +924,7 @@ export default function SideQuest() {
               <div style={{ display: "flex" }}>
                 {cards.slice(0, 3).map((c, i) => (
                   <div key={c.uid} style={{ transform: `rotate(${(i - 1) * 8}deg) translateX(${(i - 1) * -26}px)`, zIndex: i }}>
-                    <GameCard card={c} theme={themeObj} art={arts[c.uid]} flipped compact />
+                    <GameCard card={c} theme={themeObj} art={arts[c.uid]} photo={(participants.find((p) => p.id === c.pid) || {}).photo || null} flipped compact />
                   </div>
                 ))}
               </div>
