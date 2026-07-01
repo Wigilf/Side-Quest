@@ -119,6 +119,88 @@ const FALLBACK_LORE = {
   ],
 };
 
+// Theme-adaptive safety net. The live Claude call cannot run from a plain
+// browser build (an API key must never ship client-side — that needs the
+// backend proxy in docs/SideQuest_Backend_Spec.md), so when it fails we build a
+// deck whose tone MATCHES the chosen world instead of always serving fantasy.
+// {n} is replaced with each participant's name. "fantasy" reuses FALLBACK_LORE
+// so the sample/demo deck reproduces its hand-crafted cards exactly.
+const FALLBACK_STYLES = {
+  fantasy: { quest: FALLBACK_LORE.questCard, cards: FALLBACK_LORE.cards },
+
+  scifi: {
+    quest: { title: "The Last Jump", typeLine: "Quest", ability: "The squadron must clear every pilot's trial before the fleet reaches the jump gate. If a single trial is unfinished, the whole crew refuels the next round.", flavor: "Hold the line. Then hold one more." },
+    cards: [
+      { title: "{n}, Ace of the Vanguard", typeLine: "Legendary Pilot — Squadron Champion", cost: 7, power: 5, toughness: 5, ability: "At the start of each round, {n} calls the opening maneuver; the crew follows or forfeits a shield.", flavor: "Never tell {n} the odds." },
+      { title: "{n}, Keeper of the Codes", typeLine: "Legendary Operator — Strategist", cost: 5, power: 3, toughness: 6, ability: "Tap {n} to decrypt the next objective; everyone groans, then complies.", flavor: "I ran the numbers. You won't like them." },
+      { title: "{n} the Unrelenting", typeLine: "Legendary Trooper — Vanguard", cost: 4, power: 6, toughness: 2, ability: "Whenever a round tries to end early, {n} declares 'one more sortie' and it does not end.", flavor: "Sleep is for the docked." },
+      { title: "{n}, Voice of the Council", typeLine: "Legendary Envoy — Peacekeeper", cost: 4, power: 2, toughness: 7, ability: "Once per night, {n} may veto one catastrophically bad plan before it costs a deposit.", flavor: "Someone has to remember where we parked the ship." },
+      { title: "{n} of the Outer Rim", typeLine: "Legendary Smuggler — Rogue", cost: 3, power: 5, toughness: 3, ability: "{n} always has exactly the contraband the mission needs, no questions asked.", flavor: "Don't scan the cargo hold." },
+    ],
+  },
+
+  arcane: {
+    quest: { title: "The Unwritten Examination", typeLine: "Quest", ability: "The house must pass every trial set tonight before the final bell tolls. Leave one incantation unfinished and the whole table drinks a mystery potion.", flavor: "It does not do to dwell on sobriety and forget to live." },
+    cards: [
+      { title: "{n}, the Chosen One", typeLine: "Legendary Wizard — House Champion", cost: 7, power: 4, toughness: 6, ability: "At the start of each round, {n} attempts a spell of dubious control; if it fizzles, {n} loses a point of dignity.", flavor: "Books and cleverness — {n} had neither, and thrived." },
+      { title: "{n}, Keeper of the Grimoire", typeLine: "Legendary Scholar — Sage", cost: 5, power: 3, toughness: 5, ability: "Tap {n} to reveal the next trial; the table sighs and obeys.", flavor: "I read ahead. We are not ready." },
+      { title: "{n} the Reckless", typeLine: "Legendary Duelist — Berserker", cost: 4, power: 6, toughness: 2, ability: "Whenever a round would end early, {n} shouts 'again!' and it does not end.", flavor: "Rules are more like guidelines, really." },
+      { title: "{n}, the Prefect", typeLine: "Legendary Cleric — Diplomat", cost: 4, power: 2, toughness: 7, ability: "Once per night, {n} may dispel one terrible idea before it earns detention.", flavor: "Someone has to count us back to the dormitory." },
+      { title: "{n} of the Hidden Flask", typeLine: "Legendary Trickster — Rogue", cost: 3, power: 5, toughness: 3, ability: "{n} always conjures precisely what the quest requires, source unknown.", flavor: "Best not to ask which cupboard it came from." },
+    ],
+  },
+
+  adventure: {
+    quest: { title: "The Grand Voyage", typeLine: "Quest", ability: "The crew must complete every trial across the isles before the tide turns at dawn. Leave one undone and the whole ship shares the captain's tab.", flavor: "A pirate's life chooses you — usually around midnight." },
+    cards: [
+      { title: "{n}, Captain of the Tide", typeLine: "Legendary Pirate — Crew Champion", cost: 7, power: 5, toughness: 5, ability: "At the start of each round, {n} names the heading; the crew sails it or swabs a round.", flavor: "{n} feared no sea. Only last call." },
+      { title: "{n}, Keeper of the Charts", typeLine: "Legendary Navigator — Sage", cost: 5, power: 3, toughness: 5, ability: "Tap {n} to chart the next trial; everyone grumbles and rows.", flavor: "X marks the spot. I marked three." },
+      { title: "{n} the Unsinkable", typeLine: "Legendary Brawler — Reveler", cost: 4, power: 6, toughness: 2, ability: "Whenever a round tries to end early, {n} bellows 'one more port' and it does not end.", flavor: "Sleep is a landlubber's habit." },
+      { title: "{n}, Voice of Calm Seas", typeLine: "Legendary Quartermaster — Diplomat", cost: 4, power: 2, toughness: 7, ability: "Once per night, {n} may scuttle one disastrous idea before it costs the deposit.", flavor: "Someone must recall the name of the inn." },
+      { title: "{n} of the Hidden Hold", typeLine: "Legendary Rogue — Trickster", cost: 3, power: 5, toughness: 3, ability: "{n} always has exactly the supplies the quest demands, no questions asked.", flavor: "Don't ask what's under the tarp." },
+    ],
+  },
+
+  cyber: {
+    quest: { title: "One Last Run", typeLine: "Quest", ability: "The crew must clear every job on the board before the neon dims at sunrise. Miss one contract and the whole team pays the next tab in full.", flavor: "The city never sleeps, so neither do we." },
+    cards: [
+      { title: "{n}, the Runner", typeLine: "Legendary Netrunner — Crew Champion", cost: 7, power: 5, toughness: 5, ability: "At the start of each round, {n} jacks in first; the crew follows or drops a data-shard.", flavor: "{n} feared no ICE. Only the group chat." },
+      { title: "{n}, Keeper of the Grid", typeLine: "Legendary Fixer — Strategist", cost: 5, power: 3, toughness: 6, ability: "Tap {n} to surface the next contract; the crew groans and uploads.", flavor: "I priced the job. You're all underpaid." },
+      { title: "{n} the Overclocked", typeLine: "Legendary Solo — Berserker", cost: 4, power: 6, toughness: 2, ability: "Whenever a round would end early, {n} says 'one more run' and it does not end.", flavor: "Downtime is a corpo myth." },
+      { title: "{n}, Voice of the Static", typeLine: "Legendary Medtech — Diplomat", cost: 4, power: 2, toughness: 7, ability: "Once per night, {n} may firewall one catastrophic idea before it drains the account.", flavor: "Someone has to log the safehouse address." },
+      { title: "{n} of the Back Alley", typeLine: "Legendary Smuggler — Rogue", cost: 3, power: 5, toughness: 3, ability: "{n} always has exactly the gear the job needs, serial numbers filed off.", flavor: "Don't scan the duffel." },
+    ],
+  },
+
+  noir: {
+    quest: { title: "The Long Night", typeLine: "Quest", ability: "The outfit must close every case laid out tonight before the last streetlight dies. Leave one unsolved and the whole table buys the final round.", flavor: "Everybody's guilty of something. Tonight we find out what." },
+    cards: [
+      { title: "{n}, the Detective", typeLine: "Legendary Gumshoe — Outfit Lead", cost: 7, power: 4, toughness: 6, ability: "At the start of each round, {n} opens the case; the table plays along or forfeits a clue.", flavor: "{n} trusted no one. Especially the bartender." },
+      { title: "{n}, Keeper of the Files", typeLine: "Legendary Archivist — Sage", cost: 5, power: 3, toughness: 5, ability: "Tap {n} to reveal the next lead; everyone sighs and follows the trail.", flavor: "I have a file on all of you." },
+      { title: "{n} the Hard-Boiled", typeLine: "Legendary Enforcer — Berserker", cost: 4, power: 6, toughness: 2, ability: "Whenever a round tries to end early, {n} orders 'one for the road' and it does not end.", flavor: "Sleep? In this town?" },
+      { title: "{n}, the Fixer's Conscience", typeLine: "Legendary Counsel — Diplomat", cost: 4, power: 2, toughness: 7, ability: "Once per night, {n} may bury one terrible idea before it makes the papers.", flavor: "Someone has to remember which bar we started in." },
+      { title: "{n} of the Back Room", typeLine: "Legendary Grifter — Rogue", cost: 3, power: 5, toughness: 3, ability: "{n} always has exactly what the case requires, provenance unclear.", flavor: "Don't ask whose coat that was." },
+    ],
+  },
+};
+
+// Remap a themed template onto the real cast, in participant order.
+function buildFallbackLore(src) {
+  const th = THEMES.find((t) => t.id === src.theme) || THEMES[1];
+  const tpl = FALLBACK_STYLES[th.style] || FALLBACK_STYLES.fantasy;
+  const names = src.participants.map((p) => p.name || "Hero");
+  const cards = names.map((nm, i) => {
+    const base = tpl.cards[i % tpl.cards.length];
+    const sub = (s) => (s || "").replace(/\{n\}/g, nm);
+    return {
+      ...base,
+      title: sub(base.title), ability: sub(base.ability), flavor: sub(base.flavor),
+      realName: nm, frame: CARD_FRAMES[i % CARD_FRAMES.length].key,
+    };
+  });
+  return { questCard: { ...tpl.quest, typeLine: "Quest" }, cards };
+}
+
 // ---------------------------------------------------------------------------
 // CLAUDE (Anthropic API) — LIVE
 // ---------------------------------------------------------------------------
@@ -340,10 +422,14 @@ function GameCard({ card, theme, art, loadingArt, flipped, onFlip, onRegenLore, 
     <div style={{ width: W, perspective: 1200 }}>
       <div
         onClick={onFlip}
+        role={onFlip ? "button" : undefined}
+        tabIndex={onFlip ? 0 : undefined}
+        aria-label={onFlip ? `Flip ${card.realName}'s card` : undefined}
+        onKeyDown={onFlip ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onFlip(); } } : undefined}
         style={{
           position: "relative", width: "100%", height: (compact ? 340 : 440),
           transformStyle: "preserve-3d", transition: "transform .7s cubic-bezier(.2,.8,.2,1)",
-          transform: flipped ? "rotateY(0deg)" : "rotateY(180deg)", cursor: "pointer",
+          transform: flipped ? "rotateY(0deg)" : "rotateY(180deg)", cursor: onFlip ? "pointer" : "default",
         }}
       >
         {/* ---- CARD BACK ---- */}
@@ -459,6 +545,7 @@ export default function SideQuest() {
   const [genState, setGenState] = useState("idle");
   const [error, setError] = useState("");
   const [busyCard, setBusyCard] = useState(null);
+  const [orderPlaced, setOrderPlaced] = useState(false);
 
   // ---- persistence ----
   const [savedDecks, setSavedDecks] = useState([]); // [{id,name,theme,eventType,count,updatedAt}]
@@ -509,8 +596,13 @@ export default function SideQuest() {
       setUser(d.user || { name: "", email: "" });
       setEventType(d.eventType); setTheme(d.theme); setQuestPrompt(d.questPrompt || "");
       setParticipants(d.participants || []); setQuestCard(d.questCard || null);
-      setCards(d.cards || []); setArts(d.arts || {});
-      const fl = {}; (d.cards || []).forEach((c) => (fl[c.realName] = true)); setFlipped(fl);
+      // Backfill uid/pid for decks saved before this field existed.
+      const loaded = (d.cards || []).map((c, i) => ({
+        ...c, uid: c.uid ?? `${c.realName}-${i}`,
+        pid: c.pid ?? (d.participants && d.participants[i] ? d.participants[i].id : null),
+      }));
+      setCards(loaded); setArts(d.arts || {});
+      const fl = {}; loaded.forEach((c) => (fl[c.uid] = true)); setFlipped(fl);
       setCurrentDeckId(d.id); setGenState("done"); setShowDecks(false);
       setLanding(false); setStep(4);
     } catch (e) { setError("Couldn't open that deck."); }
@@ -525,7 +617,7 @@ export default function SideQuest() {
   function newDeck() {
     setCurrentDeckId(null); setUser({ name: "", email: "" }); setEventType(null);
     setTheme(null); setQuestPrompt(""); setParticipants([]); setQuestCard(null);
-    setCards([]); setArts({}); setFlipped({}); setGenState("idle");
+    setCards([]); setArts({}); setFlipped({}); setGenState("idle"); setOrderPlaced(false);
     setShowDecks(false); setLanding(false); setStep(0);
   }
 
@@ -555,33 +647,34 @@ export default function SideQuest() {
         lore = await generateDeckLore(src);
         if (!lore || !Array.isArray(lore.cards) || lore.cards.length === 0) throw new Error("empty");
       } catch (loreErr) {
-        console.warn("Live lore failed, using fallback deck:", loreErr);
-        // Remap the baked-in cards onto whatever names the user actually entered,
-        // so even an offline failure still stars THEIR crew.
-        const names = src.participants.map((p) => p.name || "Hero");
-        const base = FALLBACK_LORE.cards;
-        const cards = names.map((nm, i) => ({ ...base[i % base.length], realName: nm }));
-        lore = { questCard: FALLBACK_LORE.questCard, cards };
+        console.warn("Live lore failed, using themed fallback deck:", loreErr);
+        lore = buildFallbackLore(src);
       }
       setQuestCard(lore.questCard);
-      const ordered = lore.cards || [];
+      // Attach a stable uid (the participant's id) so per-card art/flip state and
+      // React keys never collide when two guests share the same name. Cards come
+      // back in participant order; pid lets us look photos up without name matching.
+      const ordered = (lore.cards || []).map((c, i) => {
+        const p = src.participants[i];
+        return { ...c, uid: p && p.id != null ? String(p.id) : `${c.realName}-${i}`, pid: p ? p.id : null };
+      });
       setCards(ordered);
       setGenState("art");
       const th = THEMES.find((t) => t.id === src.theme) || THEMES[1];
-      for (let i = 0; i < ordered.length; i++) {
-        const c = ordered[i];
-        const part = src.participants.find((p) => (p.name || "Unnamed") === c.realName);
-        setLoadingArt((s) => ({ ...s, [c.realName]: true }));
+      // Flips stay on a fixed, staggered timeline for drama...
+      ordered.forEach((c, i) => setTimeout(() => setFlipped((s) => ({ ...s, [c.uid]: true })), 250 + i * 320));
+      // ...but paint every card's art in parallel so a large cast isn't stuck in a slow queue.
+      await Promise.all(ordered.map(async (c, i) => {
+        const part = src.participants.find((p) => p.id === c.pid) || src.participants[i];
+        setLoadingArt((s) => ({ ...s, [c.uid]: true }));
         try {
           const frAccent = (CARD_FRAMES.find((f) => f.key === c.frame) || CARD_FRAMES[0]).accent;
           const art = await generateCardArt({ photoBase64: part?.photo || null, frameAccent: frAccent, themeStyle: th.style, seedStr: c.realName + c.title });
-          setArts((s) => ({ ...s, [c.realName]: art }));
+          setArts((s) => ({ ...s, [c.uid]: art }));
         } finally {
-          setLoadingArt((s) => ({ ...s, [c.realName]: false }));
+          setLoadingArt((s) => ({ ...s, [c.uid]: false }));
         }
-        // staggered dramatic flip
-        setTimeout(() => setFlipped((s) => ({ ...s, [c.realName]: true })), 250 + i * 320);
-      }
+      }));
       setGenState("done");
       // Auto-save so the deck survives a refresh — captured locally to avoid stale state.
       setTimeout(() => autoSave(src, lore.questCard, ordered), 400);
@@ -612,24 +705,26 @@ export default function SideQuest() {
     });
   }
 
-  async function regenLore(realName) {
-    setBusyCard(realName);
+  async function regenLore(uid) {
+    setBusyCard(uid);
     try {
-      const card = cards.find((c) => c.realName === realName);
+      const card = cards.find((c) => c.uid === uid);
       const fresh = await regenerateOneCard({ eventType, theme, questPrompt, card });
-      setCards((cs) => cs.map((c) => (c.realName === realName ? { ...c, ...fresh, realName } : c)));
+      // Preserve identity fields and the existing frame so the already-painted
+      // art keeps matching the card's accent color.
+      setCards((cs) => cs.map((c) => (c.uid === uid ? { ...c, ...fresh, frame: c.frame, realName: c.realName, uid: c.uid, pid: c.pid } : c)));
     } catch (e) { setError(e.message); } finally { setBusyCard(null); }
   }
 
-  async function regenArt(realName) {
-    setBusyCard(realName); setLoadingArt((s) => ({ ...s, [realName]: true }));
+  async function regenArt(uid) {
+    setBusyCard(uid); setLoadingArt((s) => ({ ...s, [uid]: true }));
     try {
-      const card = cards.find((c) => c.realName === realName);
-      const part = participants.find((p) => (p.name || "Unnamed") === realName);
+      const card = cards.find((c) => c.uid === uid);
+      const part = participants.find((p) => p.id === card.pid);
       const frAccent = (CARD_FRAMES.find((f) => f.key === card.frame) || CARD_FRAMES[0]).accent;
-      const art = await generateCardArt({ photoBase64: part?.photo || null, frameAccent: frAccent, themeStyle: themeObj.style, seedStr: realName + card.title + Math.random() });
-      setArts((s) => ({ ...s, [realName]: art }));
-    } catch (e) { setError(e.message); } finally { setLoadingArt((s) => ({ ...s, [realName]: false })); setBusyCard(null); }
+      const art = await generateCardArt({ photoBase64: part?.photo || null, frameAccent: frAccent, themeStyle: themeObj.style, seedStr: card.realName + card.title + Math.random() });
+      setArts((s) => ({ ...s, [uid]: art }));
+    } catch (e) { setError(e.message); } finally { setLoadingArt((s) => ({ ...s, [uid]: false })); setBusyCard(null); }
   }
 
   const canNext = {
@@ -697,7 +792,7 @@ export default function SideQuest() {
         {/* STEP 0: EVENT */}
         {step === 0 && (
           <Panel title="What's the occasion?" sub="Pick the kind of event you're building for.">
-            <div style={grid(2)}>
+            <div style={grid(240)}>
               {EVENT_TYPES.map((e) => (
                 <SelectCard key={e.id} active={eventType === e.id} onClick={() => setEventType(e.id)} icon={e.icon} title={e.label} hint={e.hint} />
               ))}
@@ -709,7 +804,7 @@ export default function SideQuest() {
         {/* STEP 1: WORLD */}
         {step === 1 && (
           <Panel title="Choose a world" sub="The lore, the fonts, and the card style all adapt to this.">
-            <div style={grid(3)}>
+            <div style={grid(200)}>
               {THEMES.map((t) => (
                 <button key={t.id} onClick={() => setTheme(t.id)} className="ql-fade" style={{
                   textAlign: "left", cursor: "pointer", borderRadius: 14, padding: 16, overflow: "hidden",
@@ -774,7 +869,8 @@ export default function SideQuest() {
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
                   <SectionLabel>{genState === "art" ? "Dealing your deck…" : "Your deck — tap a card to flip, refine below"}</SectionLabel>
                   {genState === "done" && (
-                    <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                    <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                      <GhostButton onClick={() => setStep(3)}>← Edit cast</GhostButton>
                       <GhostButton onClick={saveCurrentDeck}>
                         {saveState === "saving" ? "Saving…" : saveState === "saved" ? "✓ Saved" : "⤓ Save deck"}
                       </GhostButton>
@@ -784,9 +880,9 @@ export default function SideQuest() {
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(232px, 1fr))", gap: 26, justifyItems: "center", marginTop: 18 }}>
                   {cards.map((c) => (
-                    <GameCard key={c.realName} card={c} theme={themeObj} art={arts[c.realName]} loadingArt={loadingArt[c.realName]}
-                      flipped={!!flipped[c.realName]} onFlip={() => setFlipped((s) => ({ ...s, [c.realName]: !s[c.realName] }))}
-                      compact busy={busyCard === c.realName} onRegenLore={() => regenLore(c.realName)} onRegenArt={() => regenArt(c.realName)} />
+                    <GameCard key={c.uid} card={c} theme={themeObj} art={arts[c.uid]} loadingArt={loadingArt[c.uid]}
+                      flipped={!!flipped[c.uid]} onFlip={() => setFlipped((s) => ({ ...s, [c.uid]: !s[c.uid] }))}
+                      compact busy={busyCard === c.uid} onRegenLore={() => regenLore(c.uid)} onRegenArt={() => regenArt(c.uid)} />
                   ))}
                 </div>
               </>
@@ -806,8 +902,8 @@ export default function SideQuest() {
             <div style={{ display: "flex", gap: 30, flexWrap: "wrap", alignItems: "center", justifyContent: "center" }}>
               <div style={{ display: "flex" }}>
                 {cards.slice(0, 3).map((c, i) => (
-                  <div key={c.realName} style={{ transform: `rotate(${(i - 1) * 8}deg) translateX(${(i - 1) * -26}px)`, zIndex: i }}>
-                    <GameCard card={c} theme={themeObj} art={arts[c.realName]} flipped compact />
+                  <div key={c.uid} style={{ transform: `rotate(${(i - 1) * 8}deg) translateX(${(i - 1) * -26}px)`, zIndex: i }}>
+                    <GameCard card={c} theme={themeObj} art={arts[c.uid]} flipped compact />
                   </div>
                 ))}
               </div>
@@ -815,8 +911,15 @@ export default function SideQuest() {
                 <div style={{ fontFamily: DISPLAY_FONT, fontSize: 24, marginBottom: 6 }}>{cards.length}-card custom deck</div>
                 <div style={{ color: "#a8a8b8", marginBottom: 16 }}>Linen finish, full bleed, tuck box. Designed for {user.name || "your"} event.</div>
                 <div style={{ fontFamily: DISPLAY_FONT, fontSize: 32, color: "#f3cf5b", marginBottom: 16 }}>$39<span style={{ fontSize: 16, color: "#a8a8b8" }}> + shipping</span></div>
-                <PrimaryButton onClick={() => alert("Checkout goes here: Stripe + address capture + print-on-demand handoff.")} style={{ width: "100%" }}>Order physical deck</PrimaryButton>
-                <GhostButton onClick={() => setStep(4)} style={{ width: "100%", marginTop: 10 }}>← Back to deck</GhostButton>
+                {orderPlaced ? (
+                  <div style={{ padding: "14px 16px", borderRadius: 10, border: "1px solid #5bef82", background: "rgba(91,239,130,0.10)", color: "#c9f7d6", fontSize: 14, lineHeight: 1.45 }}>
+                    <div style={{ fontWeight: 600, marginBottom: 4 }}>✓ Order started</div>
+                    Checkout — Stripe payment, address capture, and the print-on-demand handoff — plugs in right here.
+                  </div>
+                ) : (
+                  <PrimaryButton onClick={() => setOrderPlaced(true)} style={{ width: "100%" }}>Order physical deck</PrimaryButton>
+                )}
+                <GhostButton onClick={() => { setOrderPlaced(false); setStep(4); }} style={{ width: "100%", marginTop: 10 }}>← Back to deck</GhostButton>
               </div>
             </div>
           </Panel>
@@ -923,7 +1026,10 @@ function Panel({ title, sub, children }) {
   );
 }
 
-function grid(cols) { return { display: "grid", gridTemplateColumns: `repeat(${cols}, 1fr)`, gap: 14 }; }
+// auto-fit + minmax so the wizard grids collapse to fewer columns on narrow
+// screens instead of crushing fixed columns. `min` is the smallest a card may
+// shrink to before the grid drops a column.
+function grid(min) { return { display: "grid", gridTemplateColumns: `repeat(auto-fit, minmax(${min}px, 1fr))`, gap: 14 }; }
 
 function SelectCard({ active, onClick, icon, title, hint }) {
   return (
