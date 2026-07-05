@@ -8,8 +8,8 @@ services:
     name: sidequest-backend
     runtime: node
     plan: free
-    # No dependencies to install — the server uses only Node built-ins.
-    buildCommand: "echo no build step"
+    # Installs the one backend dep (pg). --omit=dev skips the frontend toolchain.
+    buildCommand: "npm install --omit=dev"
     startCommand: "node server/index.mjs"
     healthCheckPath: /api/health
     envVars:

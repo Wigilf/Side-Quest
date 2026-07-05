@@ -18,6 +18,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { query, migrate, dbEnabled } from "./db.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -64,6 +65,95 @@ async function fetchWithTimeout(url, opts = {}, ms = UPSTREAM_TIMEOUT_MS) {
   } finally {
     clearTimeout(t);
   }
+}
+
+// ---- Accounts (DB-backed) -------------------------------------------------
+
+function httpErr(status, msg) { const e = new Error(msg); e.status = status; return e; }
+function requireDb() { if (!dbEnabled()) throw httpErr(503, "accounts unavailable — DATABASE_URL not configured"); }
+function requireUser(ctx) { if (!ctx.userId) throw httpErr(401, "sign in required"); }
+
+function hashPassword(pw) {
+  const salt = crypto.randomBytes(16).toString("hex");
+  const hash = crypto.scryptSync(pw, salt, 64).toString("hex");
+  return `${salt}:${hash}`;
+}
+function verifyPassword(pw, stored) {
+  const [salt, hash] = (stored || "").split(":");
+  if (!salt || !hash) return false;
+  const test = crypto.scryptSync(pw, salt, 64).toString("hex");
+  try { return crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(test)); } catch { return false; }
+}
+
+async function createSession(userId) {
+  const token = crypto.randomBytes(32).toString("hex");
+  await query("INSERT INTO sessions (token, user_id, expires_at) VALUES ($1, $2, now() + interval '30 days')", [token, userId]);
+  return token;
+}
+
+// Resolve the signed-in user (if any) from the Authorization: Bearer <token> header.
+async function resolveAuth(req) {
+  const m = (req.headers.authorization || "").match(/^Bearer\s+(.+)$/);
+  if (!m || !dbEnabled()) return { userId: null, token: null };
+  try {
+    const r = await query("SELECT user_id FROM sessions WHERE token = $1 AND expires_at > now()", [m[1]]);
+    return { userId: r.rows[0]?.user_id || null, token: m[1] };
+  } catch { return { userId: null, token: null }; }
+}
+
+async function authSignup({ email, password, displayName }) {
+  requireDb();
+  email = (email || "").trim().toLowerCase();
+  if (!email.includes("@") || !password || password.length < 8) throw httpErr(422, "valid email and password (min 8 chars) required");
+  if ((await query("SELECT 1 FROM users WHERE email = $1", [email])).rows.length) throw httpErr(409, "email already registered");
+  const id = crypto.randomUUID();
+  await query("INSERT INTO users (id, email, password_hash, display_name) VALUES ($1, $2, $3, $4)", [id, email, hashPassword(password), displayName || null]);
+  return { user: { id, email, displayName: displayName || null }, token: await createSession(id) };
+}
+
+async function authLogin({ email, password }) {
+  requireDb();
+  email = (email || "").trim().toLowerCase();
+  const r = await query("SELECT id, email, password_hash, display_name FROM users WHERE email = $1", [email]);
+  const u = r.rows[0];
+  if (!u || !verifyPassword(password, u.password_hash)) throw httpErr(401, "invalid email or password");
+  return { user: { id: u.id, email: u.email, displayName: u.display_name }, token: await createSession(u.id) };
+}
+
+// ---- Deck persistence (replaces the client's localStorage shim) ------------
+
+async function decksList(ctx) {
+  requireUser(ctx);
+  const r = await query("SELECT id, name, theme, event_type, card_count, updated_at FROM decks WHERE user_id = $1 ORDER BY updated_at DESC", [ctx.userId]);
+  return { decks: r.rows.map((d) => ({ id: d.id, name: d.name, theme: d.theme, eventType: d.event_type, count: d.card_count, updatedAt: new Date(d.updated_at).getTime() })) };
+}
+
+async function deckSave(ctx, body) {
+  requireUser(ctx);
+  const payload = body && body.payload ? body.payload : body;
+  const id = String(payload.id || crypto.randomUUID());
+  const name = payload.name || "Untitled deck";
+  await query(
+    `INSERT INTO decks (id, user_id, name, theme, event_type, card_count, payload, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+     ON CONFLICT (id) DO UPDATE SET name = $3, theme = $4, event_type = $5, card_count = $6, payload = $7, updated_at = now()
+     WHERE decks.user_id = $2`,
+    [id, ctx.userId, name, payload.theme || null, payload.eventType || null, (payload.cards || []).length, payload]
+  );
+  return { id };
+}
+
+async function deckGet(ctx, id) {
+  requireUser(ctx);
+  const r = await query("SELECT payload FROM decks WHERE id = $1 AND user_id = $2", [id, ctx.userId]);
+  if (!r.rows.length) throw httpErr(404, "deck not found");
+  return { deck: r.rows[0].payload };
+}
+
+async function deckDelete(ctx, id) {
+  requireUser(ctx);
+  await query("DELETE FROM decks WHERE id = $1 AND user_id = $2", [id, ctx.userId]);
+  return { ok: true };
 }
 
 // ---- Anthropic (lore) -----------------------------------------------------
@@ -183,7 +273,7 @@ function toForm(obj, prefix, out = []) {
   return out;
 }
 
-async function stripeCreateCheckoutSession({ deckName, cardCount, quantity }) {
+async function stripeCreateCheckoutSession({ deckName, cardCount, quantity }, ctx) {
   const key = process.env.STRIPE_SECRET_KEY;
   if (!key) throw new Error("STRIPE_SECRET_KEY is not set on the server");
   const qty = Math.max(1, Math.min(20, Number(quantity) || 1));
@@ -191,6 +281,7 @@ async function stripeCreateCheckoutSession({ deckName, cardCount, quantity }) {
     mode: "payment",
     success_url: `${SITE_URL}?checkout=success`,
     cancel_url: `${SITE_URL}?checkout=cancel`,
+    ...(ctx && ctx.userId ? { client_reference_id: ctx.userId } : {}),
     line_items: [{
       quantity: qty,
       price_data: {
@@ -230,13 +321,21 @@ function verifyStripeSig(rawBody, sigHeader, secret) {
   catch { return false; }
 }
 
-function handleStripeEvent(event) {
+async function handleStripeEvent(event) {
   switch (event.type) {
     case "checkout.session.completed": {
       const s = event.data.object;
-      // No DB yet — record the paid order in logs. Persisting it and handing off
-      // to print-on-demand is the next slice (docs/SideQuest_Checkout_Flow.md §D).
       console.log(`✅ PAID: session=${s.id} total=${s.amount_total} ${s.currency} email=${s.customer_details?.email || "?"}`);
+      if (dbEnabled()) {
+        // Idempotent on stripe_session_id — Stripe may deliver this more than once.
+        await query(
+          `INSERT INTO orders (id, user_id, stripe_session_id, amount_cents, currency, email, status, ship_to)
+           VALUES ($1, $2, $3, $4, $5, $6, 'paid', $7)
+           ON CONFLICT (stripe_session_id) DO NOTHING`,
+          [crypto.randomUUID(), s.client_reference_id || null, s.id, s.amount_total, s.currency,
+           s.customer_details?.email || null, s.shipping_details || s.customer_details?.address || null]
+        );
+      }
       break;
     }
     case "checkout.session.expired":
@@ -346,10 +445,22 @@ const routes = {
     anthropic: !!process.env.ANTHROPIC_API_KEY,
     google: !!process.env.GOOGLE_API_KEY,
     stripe: !!process.env.STRIPE_SECRET_KEY,
+    db: dbEnabled(),
     model: ANTHROPIC_MODEL,
     imageModel: GEMINI_IMAGE_MODEL,
   }),
-  "POST /api/checkout": async (b) => stripeCreateCheckoutSession(b),
+  "POST /api/checkout": async (b, ctx) => stripeCreateCheckoutSession(b, ctx),
+  "POST /api/auth/signup": async (b) => authSignup(b),
+  "POST /api/auth/login": async (b) => authLogin(b),
+  "POST /api/auth/logout": async (b, ctx) => { if (ctx.token) await query("DELETE FROM sessions WHERE token = $1", [ctx.token]); return { ok: true }; },
+  "GET /api/auth/me": async (b, ctx) => {
+    requireUser(ctx);
+    const r = await query("SELECT id, email, display_name FROM users WHERE id = $1", [ctx.userId]);
+    if (!r.rows.length) throw httpErr(401, "sign in required");
+    return { user: { id: r.rows[0].id, email: r.rows[0].email, displayName: r.rows[0].display_name } };
+  },
+  "GET /api/decks": async (b, ctx) => decksList(ctx),
+  "POST /api/decks": async (b, ctx) => deckSave(ctx, b),
   "POST /api/generate-lore": async (b) => {
     const lore = await callClaude(loreDeckPrompt(b), { json: true, maxTokens: 2500 });
     if (!lore || !Array.isArray(lore.cards) || lore.cards.length === 0) throw new Error("empty lore");
@@ -382,35 +493,50 @@ const server = http.createServer(async (req, res) => {
       }
       let event;
       try { event = JSON.parse(raw); } catch { res.writeHead(400); res.end("bad json"); return; }
-      try { handleStripeEvent(event); } catch (e) { console.error("stripe event handler:", e.message); }
+      // Return 200 immediately; do the DB write in the background (spec §C3).
+      handleStripeEvent(event).catch((e) => console.error("stripe event handler:", e.message));
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ received: true }));
     });
     return;
   }
 
-  const routeKey = `${req.method} ${url.pathname}`;
-  const handler = routes[routeKey];
-  if (!handler) { send(res, 404, { error: "not_found" }, origin); return; }
+  const p = url.pathname;
+  const routeKey = `${req.method} ${p}`;
 
-  // Rate-limit the money/key-spending endpoints; token + daily cap only on AI gen.
-  if (PAID.has(url.pathname) || url.pathname === "/api/checkout") {
-    if (PAID.has(url.pathname) && API_TOKEN) {
+  // Rate-limit money/key-spending + auth endpoints (blunt brute-force/abuse).
+  const rateLimitedPath = PAID.has(p) || p === "/api/checkout" || p === "/api/auth/login" || p === "/api/auth/signup";
+  if (rateLimitedPath) {
+    if (PAID.has(p) && API_TOKEN) {
       const auth = req.headers.authorization || "";
       if (auth !== `Bearer ${API_TOKEN}`) { send(res, 401, { error: "unauthorized" }, origin); return; }
     }
     const ip = (req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.socket.remoteAddress || "unknown";
     if (rateLimited(ip)) { send(res, 429, { error: "rate_limited — slow down" }, origin); return; }
-    if (PAID.has(url.pathname) && overDailyCap()) { send(res, 429, { error: "daily generation cap reached" }, origin); return; }
+    if (PAID.has(p) && overDailyCap()) { send(res, 429, { error: "daily generation cap reached" }, origin); return; }
   }
 
   try {
+    const ctx = await resolveAuth(req);
     const body = req.method === "POST" ? await readBody(req) : {};
-    const result = await handler(body);
+
+    // /api/decks/:id — GET (open) / DELETE
+    const deckMatch = p.match(/^\/api\/decks\/([^/]+)$/);
+    let result;
+    if (deckMatch) {
+      const id = decodeURIComponent(deckMatch[1]);
+      if (req.method === "GET") result = await deckGet(ctx, id);
+      else if (req.method === "DELETE") result = await deckDelete(ctx, id);
+      else throw httpErr(404, "not_found");
+    } else {
+      const handler = routes[routeKey];
+      if (!handler) { send(res, 404, { error: "not_found" }, origin); return; }
+      result = await handler(body, ctx);
+    }
     send(res, 200, result, origin);
   } catch (e) {
     console.error(routeKey, "failed:", e.message);
-    send(res, 500, { error: e.message || "server_error" }, origin);
+    send(res, e.status || 500, { error: e.message || "server_error" }, origin);
   }
 });
 
@@ -418,4 +544,11 @@ server.listen(PORT, () => {
   console.log(`Side Quest backend on http://localhost:${PORT}`);
   console.log(`  ANTHROPIC_API_KEY: ${process.env.ANTHROPIC_API_KEY ? "set" : "MISSING"}`);
   console.log(`  GOOGLE_API_KEY:    ${process.env.GOOGLE_API_KEY ? "set" : "MISSING"}`);
+  console.log(`  STRIPE_SECRET_KEY: ${process.env.STRIPE_SECRET_KEY ? "set" : "MISSING"}`);
+  console.log(`  DATABASE_URL:      ${process.env.DATABASE_URL ? "set" : "MISSING"}`);
+  if (dbEnabled()) {
+    migrate()
+      .then(() => console.log("  DB migrations: OK"))
+      .catch((e) => console.error("  DB migrations FAILED:", e.message));
+  }
 });
