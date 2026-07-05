@@ -51,6 +51,36 @@ face→character art.
 
 ---
 
+## 3. Enable checkout (Stripe)
+
+Payment is real but needs a Stripe account. **Use test mode first.**
+
+1. Create a Stripe account → https://dashboard.stripe.com. Toggle **Test mode**
+   (top right).
+2. **Secret key:** Developers → API keys → copy the **Secret key** (`sk_test_...`).
+   Add it to the backend host as **`STRIPE_SECRET_KEY`**.
+3. **Webhook:** Developers → Webhooks → **Add endpoint**:
+   - URL: `https://<your-backend-url>/api/webhooks/stripe`
+   - Events: `checkout.session.completed`, `checkout.session.expired`,
+     `payment_intent.payment_failed`
+   - After creating it, copy the **Signing secret** (`whsec_...`) → add as
+     **`STRIPE_WEBHOOK_SECRET`** on the backend.
+4. Redeploy the backend. `GET /api/health` should now show `"stripe":true`.
+5. Test with Stripe's test card **4242 4242 4242 4242**, any future expiry, any
+   CVC. You'll land back on the site with a "Payment received" banner, and the
+   Stripe dashboard will show the payment.
+
+Pricing is computed **server-side** (`DECK_PRICE_CENTS`, `SHIPPING_CENTS`) — the
+browser never sends a price. Stripe's hosted page collects the card and the
+shipping address, so this app never touches payment or address data.
+
+**Not yet built (needs the DB slice):** persisting the order and handing it to a
+print-on-demand provider. Right now a completed payment is recorded in Stripe
+and logged by the webhook; turning that into a shipped deck is the next step in
+`docs/SideQuest_Checkout_Flow.md` §D.
+
+---
+
 ## Security notes (important)
 
 - A public single-page app **cannot hide a secret** — anything in the frontend

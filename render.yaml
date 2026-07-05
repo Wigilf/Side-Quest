@@ -19,6 +19,12 @@ services:
         sync: false            # prompted in dashboard; not committed
       - key: ALLOW_ORIGIN
         value: https://wigilf.github.io   # lock CORS to the live site
+      - key: SITE_URL
+        value: https://wigilf.github.io/Side-Quest/   # Stripe return URL
+      - key: STRIPE_SECRET_KEY
+        sync: false            # sk_test_... — paste in dashboard
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false            # whsec_... — paste after creating the webhook
       - key: MAX_GENERATIONS_PER_DAY
         value: "500"
       - key: RATE_MAX

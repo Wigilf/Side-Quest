@@ -555,6 +555,9 @@ export default function SideQuest() {
   const [busyCard, setBusyCard] = useState(null);
   const [orderPlaced, setOrderPlaced] = useState(false);
   const [photoConsent, setPhotoConsent] = useState(false);
+  const [checkingOut, setCheckingOut] = useState(false);
+  const [checkoutError, setCheckoutError] = useState("");
+  const [checkoutReturn, setCheckoutReturn] = useState(null); // "success" | "cancel"
 
   // ---- persistence ----
   const [savedDecks, setSavedDecks] = useState([]); // [{id,name,theme,eventType,count,updatedAt}]
@@ -571,6 +574,30 @@ export default function SideQuest() {
       } catch (e) { /* no index yet — fine */ }
     })();
   }, []);
+
+  // Detect a return from Stripe Checkout (?checkout=success|cancel) and clean the URL.
+  useEffect(() => {
+    const p = new URLSearchParams(window.location.search).get("checkout");
+    if (p === "success" || p === "cancel") {
+      setCheckoutReturn(p);
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+  }, []);
+
+  async function startCheckout() {
+    setCheckoutError(""); setCheckingOut(true);
+    try {
+      const d = await postJSON("/api/checkout", {
+        deckName: (questPrompt || "").slice(0, 60) || "Side Quest custom deck",
+        cardCount: cards.length,
+        quantity: 1,
+      });
+      if (d && d.checkoutUrl) { window.location.href = d.checkoutUrl; return; }
+      throw new Error("no checkout URL returned");
+    } catch (e) {
+      setCheckoutError(e.message || "Checkout failed"); setCheckingOut(false);
+    }
+  }
 
   async function persistDeckIndex(next) {
     setSavedDecks(next);
@@ -751,6 +778,7 @@ export default function SideQuest() {
     return (
       <div style={{ minHeight: "100vh", background: "radial-gradient(1200px 700px at 50% -5%, #2a1d3f 0%, #15121d 45%, #08070d 100%)", color: "#e8e8f0", fontFamily: UI_FONT, position: "relative", overflow: "hidden" }}>
         <GlobalCSS />
+        {checkoutReturn && <CheckoutBanner status={checkoutReturn} onClose={() => setCheckoutReturn(null)} />}
         <FloatingCards />
         <div style={{ position: "relative", zIndex: 2, maxWidth: 820, margin: "0 auto", padding: "120px 24px 80px", textAlign: "center" }}>
           <div className="ql-fade" style={{ fontFamily: DISPLAY_FONT, fontSize: 13, letterSpacing: 8, textTransform: "uppercase", color: "#d8b24a", marginBottom: 18 }}>✦ Side Quest ✦</div>
@@ -785,6 +813,7 @@ export default function SideQuest() {
   return (
     <div style={{ minHeight: "100vh", background: `radial-gradient(1200px 600px at 50% -10%, ${themeObj.bg[1]} 0%, #14121c 50%, #0a090f 100%)`, color: "#e8e8f0", fontFamily: UI_FONT, padding: "0 0 80px", transition: "background .6s" }}>
       <GlobalCSS />
+      {checkoutReturn && <CheckoutBanner status={checkoutReturn} onClose={() => setCheckoutReturn(null)} />}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "18px 22px 0", maxWidth: 1040, margin: "0 auto" }}>
         <div onClick={() => setLanding(true)} style={{ cursor: "pointer", fontFamily: DISPLAY_FONT, fontSize: 13, letterSpacing: 5, textTransform: "uppercase", color: "#d8b24a" }}>✦ Side Quest</div>
         <div style={{ display: "flex", gap: 10 }}>
@@ -943,10 +972,22 @@ export default function SideQuest() {
                 <div style={{ fontFamily: DISPLAY_FONT, fontSize: 24, marginBottom: 6 }}>{cards.length}-card custom deck</div>
                 <div style={{ color: "#a8a8b8", marginBottom: 16 }}>Linen finish, full bleed, tuck box. Designed for {user.name || "your"} event.</div>
                 <div style={{ fontFamily: DISPLAY_FONT, fontSize: 32, color: "#f3cf5b", marginBottom: 16 }}>$39<span style={{ fontSize: 16, color: "#a8a8b8" }}> + shipping</span></div>
-                {orderPlaced ? (
+                {AI_ENABLED ? (
+                  <>
+                    <PrimaryButton onClick={startCheckout} disabled={checkingOut} style={{ width: "100%" }}>
+                      {checkingOut ? "Redirecting to secure checkout…" : "Order physical deck →"}
+                    </PrimaryButton>
+                    {checkoutError && (
+                      <div style={{ marginTop: 10, padding: "10px 12px", borderRadius: 8, border: "1px solid #ef5b6b", background: "rgba(239,91,107,0.10)", color: "#ffc4cb", fontSize: 13 }}>
+                        Couldn't start checkout: {checkoutError}
+                      </div>
+                    )}
+                    <div style={{ fontSize: 11, color: "#7a7a88", marginTop: 8, textAlign: "center" }}>Secure payment via Stripe. Shipping details collected at checkout.</div>
+                  </>
+                ) : orderPlaced ? (
                   <div style={{ padding: "14px 16px", borderRadius: 10, border: "1px solid #5bef82", background: "rgba(91,239,130,0.10)", color: "#c9f7d6", fontSize: 14, lineHeight: 1.45 }}>
-                    <div style={{ fontWeight: 600, marginBottom: 4 }}>✓ Order started</div>
-                    Checkout — Stripe payment, address capture, and the print-on-demand handoff — plugs in right here.
+                    <div style={{ fontWeight: 600, marginBottom: 4 }}>✓ Demo mode</div>
+                    Connect the backend (with a Stripe key) to take real orders.
                   </div>
                 ) : (
                   <PrimaryButton onClick={() => setOrderPlaced(true)} style={{ width: "100%" }}>Order physical deck</PrimaryButton>
@@ -1084,6 +1125,27 @@ function NavRow({ onBack, onNext, nextOk, nextLabel = "Continue →" }) {
 
 function SectionLabel({ children }) {
   return <div style={{ fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#d8b24a", marginBottom: 4 }}>{children}</div>;
+}
+
+function CheckoutBanner({ status, onClose }) {
+  const ok = status === "success";
+  return (
+    <div style={{
+      position: "fixed", top: 0, left: 0, right: 0, zIndex: 100,
+      display: "flex", alignItems: "center", justifyContent: "center", gap: 12,
+      padding: "12px 20px", fontFamily: UI_FONT, fontSize: 14,
+      color: ok ? "#c9f7d6" : "#ffc4cb",
+      background: ok ? "rgba(20,60,35,0.97)" : "rgba(60,20,26,0.97)",
+      borderBottom: `1px solid ${ok ? "#5bef82" : "#ef5b6b"}`,
+    }}>
+      <span>
+        {ok
+          ? "✓ Payment received — your custom deck is being prepared. (You'll get shipping updates by email.)"
+          : "Checkout canceled — you have not been charged."}
+      </span>
+      <button onClick={onClose} style={{ background: "none", border: "none", color: "inherit", cursor: "pointer", fontSize: 18, lineHeight: 1 }}>✕</button>
+    </div>
+  );
 }
 
 function QuestBanner({ q, t }) {

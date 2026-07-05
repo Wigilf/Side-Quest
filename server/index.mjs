@@ -16,6 +16,7 @@
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -150,6 +151,103 @@ async function generatePortrait({ photoDataUrl, themeStyle, lore, refineNote }) 
   return `data:${outMime};base64,${inline.data}`;
 }
 
+// ---- Stripe checkout (dependency-free: raw REST + HMAC) -------------------
+// Uses Stripe Checkout (hosted page): Stripe collects the card AND the shipping
+// address, so we never touch payment or address data. Price is computed here,
+// server-side — the client never sends a price. Fulfillment (print-on-demand)
+// and order persistence need the DB slice; this covers taking the payment.
+
+const CURRENCY = process.env.CURRENCY || "usd";
+const DECK_PRICE_CENTS = Number(process.env.DECK_PRICE_CENTS || 3900); // $39
+const SHIPPING_CENTS = Number(process.env.SHIPPING_CENTS || 700);      // $7
+const SITE_URL = process.env.SITE_URL || "https://wigilf.github.io/Side-Quest/";
+const SHIP_COUNTRIES = (process.env.SHIP_COUNTRIES || "US,CA,GB,IE,FR,DE,ES,IT,NL,PT,AU,NZ")
+  .split(",").map((s) => s.trim()).filter(Boolean);
+
+// Flatten a nested object into Stripe's form-encoded key[...] pairs.
+function toForm(obj, prefix, out = []) {
+  for (const [k, v] of Object.entries(obj)) {
+    if (v == null) continue;
+    const key = prefix ? `${prefix}[${k}]` : k;
+    if (Array.isArray(v)) {
+      v.forEach((item, i) => {
+        if (item && typeof item === "object") toForm(item, `${key}[${i}]`, out);
+        else out.push([`${key}[${i}]`, String(item)]);
+      });
+    } else if (typeof v === "object") {
+      toForm(v, key, out);
+    } else {
+      out.push([key, String(v)]);
+    }
+  }
+  return out;
+}
+
+async function stripeCreateCheckoutSession({ deckName, cardCount, quantity }) {
+  const key = process.env.STRIPE_SECRET_KEY;
+  if (!key) throw new Error("STRIPE_SECRET_KEY is not set on the server");
+  const qty = Math.max(1, Math.min(20, Number(quantity) || 1));
+  const params = {
+    mode: "payment",
+    success_url: `${SITE_URL}?checkout=success`,
+    cancel_url: `${SITE_URL}?checkout=cancel`,
+    line_items: [{
+      quantity: qty,
+      price_data: {
+        currency: CURRENCY,
+        unit_amount: DECK_PRICE_CENTS, // server-computed; client never sends price
+        product_data: {
+          name: (deckName || "Side Quest custom deck").slice(0, 120),
+          description: `${Number(cardCount) || 0}-card custom deck`,
+        },
+      },
+    }],
+    shipping_address_collection: { allowed_countries: SHIP_COUNTRIES },
+    shipping_options: [{
+      shipping_rate_data: {
+        type: "fixed_amount",
+        fixed_amount: { amount: SHIPPING_CENTS, currency: CURRENCY },
+        display_name: "Standard shipping",
+      },
+    }],
+  };
+  const res = await fetchWithTimeout("https://api.stripe.com/v1/checkout/sessions", {
+    method: "POST",
+    headers: { authorization: `Bearer ${key}`, "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams(toForm(params)).toString(),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(`Stripe error ${res.status}: ${data?.error?.message || "unknown"}`);
+  return { checkoutUrl: data.url };
+}
+
+function verifyStripeSig(rawBody, sigHeader, secret) {
+  if (!sigHeader || !secret) return false;
+  const parts = Object.fromEntries(sigHeader.split(",").map((kv) => kv.split("=")));
+  if (!parts.t || !parts.v1) return false;
+  const expected = crypto.createHmac("sha256", secret).update(`${parts.t}.${rawBody}`).digest("hex");
+  try { return crypto.timingSafeEqual(Buffer.from(parts.v1), Buffer.from(expected)); }
+  catch { return false; }
+}
+
+function handleStripeEvent(event) {
+  switch (event.type) {
+    case "checkout.session.completed": {
+      const s = event.data.object;
+      // No DB yet — record the paid order in logs. Persisting it and handing off
+      // to print-on-demand is the next slice (docs/SideQuest_Checkout_Flow.md §D).
+      console.log(`✅ PAID: session=${s.id} total=${s.amount_total} ${s.currency} email=${s.customer_details?.email || "?"}`);
+      break;
+    }
+    case "checkout.session.expired":
+    case "payment_intent.payment_failed":
+      console.log(`✖ checkout not completed: ${event.type}`);
+      break;
+    default:
+      break;
+  }
+}
+
 // ---- Lore prompts (ported verbatim from the client) -----------------------
 
 function loreDeckPrompt({ eventType, theme, questPrompt, participants }) {
@@ -247,9 +345,11 @@ const routes = {
     ok: true,
     anthropic: !!process.env.ANTHROPIC_API_KEY,
     google: !!process.env.GOOGLE_API_KEY,
+    stripe: !!process.env.STRIPE_SECRET_KEY,
     model: ANTHROPIC_MODEL,
     imageModel: GEMINI_IMAGE_MODEL,
   }),
+  "POST /api/checkout": async (b) => stripeCreateCheckoutSession(b),
   "POST /api/generate-lore": async (b) => {
     const lore = await callClaude(loreDeckPrompt(b), { json: true, maxTokens: 2500 });
     if (!lore || !Array.isArray(lore.cards) || lore.cards.length === 0) throw new Error("empty lore");
@@ -270,19 +370,38 @@ const server = http.createServer(async (req, res) => {
   const origin = req.headers.origin;
   if (req.method === "OPTIONS") { send(res, 204, {}, origin); return; }
   const url = new URL(req.url, "http://localhost");
+
+  // Stripe webhook: needs the RAW body for signature verification, and is called
+  // server-to-server by Stripe (no CORS / token / rate-limit).
+  if (req.method === "POST" && url.pathname === "/api/webhooks/stripe") {
+    let raw = "";
+    req.on("data", (c) => { raw += c; if (raw.length > 1_000_000) req.destroy(); });
+    req.on("end", () => {
+      if (!verifyStripeSig(raw, req.headers["stripe-signature"], process.env.STRIPE_WEBHOOK_SECRET)) {
+        res.writeHead(400); res.end("signature verification failed"); return;
+      }
+      let event;
+      try { event = JSON.parse(raw); } catch { res.writeHead(400); res.end("bad json"); return; }
+      try { handleStripeEvent(event); } catch (e) { console.error("stripe event handler:", e.message); }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ received: true }));
+    });
+    return;
+  }
+
   const routeKey = `${req.method} ${url.pathname}`;
   const handler = routes[routeKey];
   if (!handler) { send(res, 404, { error: "not_found" }, origin); return; }
 
-  // Guards apply only to the paid, key-spending endpoints.
-  if (PAID.has(url.pathname)) {
-    if (API_TOKEN) {
+  // Rate-limit the money/key-spending endpoints; token + daily cap only on AI gen.
+  if (PAID.has(url.pathname) || url.pathname === "/api/checkout") {
+    if (PAID.has(url.pathname) && API_TOKEN) {
       const auth = req.headers.authorization || "";
       if (auth !== `Bearer ${API_TOKEN}`) { send(res, 401, { error: "unauthorized" }, origin); return; }
     }
     const ip = (req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.socket.remoteAddress || "unknown";
     if (rateLimited(ip)) { send(res, 429, { error: "rate_limited — slow down" }, origin); return; }
-    if (overDailyCap()) { send(res, 429, { error: "daily generation cap reached" }, origin); return; }
+    if (PAID.has(url.pathname) && overDailyCap()) { send(res, 429, { error: "daily generation cap reached" }, origin); return; }
   }
 
   try {
