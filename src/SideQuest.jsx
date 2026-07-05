@@ -412,6 +412,9 @@ function GhostButton({ children, onClick, style }) {
 function GameCard({ card, theme, art, photo, loadingArt, flipped, onFlip, onRegenLore, onRegenArt, busy, compact }) {
   const fr = CARD_FRAMES.find((f) => f.key === card.frame) || CARD_FRAMES[0];
   const t = theme;
+  // Show the raw uploaded face only when the art is the procedural backdrop
+  // (an SVG). A real AI portrait (raster png/jpeg) already contains the face.
+  const showPhoto = photo && (!art || (typeof art === "string" && art.startsWith("data:image/svg")));
   const W = compact ? 232 : 300;
   const scale = W / 300;
   const corner = (t.corner || 10) * scale;
@@ -477,12 +480,12 @@ function GameCard({ card, theme, art, photo, loadingArt, flipped, onFlip, onRege
               </div>
             ) : (art || photo) ? (
               <>
-                {/* themed backdrop */}
+                {/* AI portrait or themed backdrop */}
                 {art && <img src={art} alt="" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }} />}
-                {/* the participant's real face, layered as its own <img> so it always paints */}
-                {photo && <img src={photo} alt={card.realName} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }} />}
+                {/* real face, layered over the procedural backdrop when there's no AI art */}
+                {showPhoto && <img src={photo} alt={card.realName} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }} />}
                 {/* theme tint so the portrait blends into the card frame */}
-                {photo && <div style={{ position: "absolute", inset: 0, pointerEvents: "none", background: `radial-gradient(120% 80% at 50% 18%, ${fr.accent}22, transparent 55%), linear-gradient(180deg, transparent 45%, ${t.bg[0]}dd 100%)` }} />}
+                {showPhoto && <div style={{ position: "absolute", inset: 0, pointerEvents: "none", background: `radial-gradient(120% 80% at 50% 18%, ${fr.accent}22, transparent 55%), linear-gradient(180deg, transparent 45%, ${t.bg[0]}dd 100%)` }} />}
               </>
             ) : (
               <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: `${fr.accent}99`, fontFamily: UI_FONT, fontSize: 11 }}>no art</div>
@@ -909,7 +912,7 @@ export default function SideQuest() {
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(232px, 1fr))", gap: 26, justifyItems: "center", marginTop: 18 }}>
                   {cards.map((c) => (
                     <GameCard key={c.uid} card={c} theme={themeObj} art={arts[c.uid]} loadingArt={loadingArt[c.uid]}
-                      photo={AI_ENABLED ? null : ((participants.find((p) => p.id === c.pid) || {}).photo || null)}
+                      photo={(participants.find((p) => p.id === c.pid) || {}).photo || null}
                       flipped={!!flipped[c.uid]} onFlip={() => setFlipped((s) => ({ ...s, [c.uid]: !s[c.uid] }))}
                       compact busy={busyCard === c.uid} onRegenLore={AI_ENABLED ? () => regenLore(c.uid) : undefined} onRegenArt={() => regenArt(c.uid)} />
                   ))}
@@ -932,7 +935,7 @@ export default function SideQuest() {
               <div style={{ display: "flex" }}>
                 {cards.slice(0, 3).map((c, i) => (
                   <div key={c.uid} style={{ transform: `rotate(${(i - 1) * 8}deg) translateX(${(i - 1) * -26}px)`, zIndex: i }}>
-                    <GameCard card={c} theme={themeObj} art={arts[c.uid]} photo={AI_ENABLED ? null : ((participants.find((p) => p.id === c.pid) || {}).photo || null)} flipped compact />
+                    <GameCard card={c} theme={themeObj} art={arts[c.uid]} photo={(participants.find((p) => p.id === c.pid) || {}).photo || null} flipped compact />
                   </div>
                 ))}
               </div>
