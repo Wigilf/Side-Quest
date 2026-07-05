@@ -210,12 +210,15 @@ function buildFallbackLore(src) {
 // theme-adaptive baked deck.
 
 const API_BASE = (import.meta.env && import.meta.env.VITE_API_BASE) || "";
+const API_TOKEN = (import.meta.env && import.meta.env.VITE_API_TOKEN) || "";
 const AI_ENABLED = !!API_BASE;
 
 async function postJSON(pathname, body) {
+  const headers = { "Content-Type": "application/json" };
+  if (API_TOKEN) headers["Authorization"] = `Bearer ${API_TOKEN}`;
   const res = await fetch(`${API_BASE}${pathname}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify(body),
   });
   if (!res.ok) {

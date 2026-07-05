@@ -34,9 +34,36 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 })();
 
 const PORT = Number(process.env.PORT || 8787);
-const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || "*";
 const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
 const GEMINI_IMAGE_MODEL = process.env.GEMINI_IMAGE_MODEL || "gemini-2.5-flash-image";
+
+// --- Abuse / cost controls (these endpoints spend real money) --------------
+// ALLOW_ORIGIN: comma-separated allowlist, or "*". A browser request whose
+// Origin isn't listed gets no CORS header and is blocked by the browser.
+const ALLOW_ORIGINS = (process.env.ALLOW_ORIGIN || "*").split(",").map((s) => s.trim()).filter(Boolean);
+const ALLOW_ALL_ORIGINS = ALLOW_ORIGINS.includes("*");
+// Optional shared secret. If set, paid endpoints require `Authorization: Bearer <token>`.
+const API_TOKEN = process.env.SIDEQUEST_API_TOKEN || "";
+// Per-IP sliding-window rate limit.
+const RATE_MAX = Number(process.env.RATE_MAX || 30);
+const RATE_WINDOW_MS = Number(process.env.RATE_WINDOW_MS || 60_000);
+// Hard global ceiling on paid generations per rolling 24h — bounds worst-case spend.
+const MAX_GENERATIONS_PER_DAY = Number(process.env.MAX_GENERATIONS_PER_DAY || 500);
+// Abort upstream calls that hang.
+const UPSTREAM_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS || 60_000);
+
+async function fetchWithTimeout(url, opts = {}, ms = UPSTREAM_TIMEOUT_MS) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try {
+    return await fetch(url, { ...opts, signal: ctrl.signal });
+  } catch (e) {
+    if (e.name === "AbortError") throw new Error(`upstream timeout after ${ms}ms`);
+    throw e;
+  } finally {
+    clearTimeout(t);
+  }
+}
 
 // ---- Anthropic (lore) -----------------------------------------------------
 
@@ -46,7 +73,7 @@ async function callClaude(prompt, { json = false, maxTokens = 1200 } = {}) {
   const sys = json
     ? "You respond ONLY with valid minified JSON. No markdown, no code fences, no preamble."
     : "";
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+  const res = await fetchWithTimeout("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -103,7 +130,7 @@ async function generatePortrait({ photoDataUrl, themeStyle, lore, refineNote }) 
   const url =
     `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_IMAGE_MODEL}:generateContent?key=` +
     encodeURIComponent(key);
-  const res = await fetch(url, {
+  const res = await fetchWithTimeout(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -156,15 +183,46 @@ function loreOnePrompt({ eventType, theme, questPrompt, card }) {
 
 // ---- HTTP plumbing --------------------------------------------------------
 
-function send(res, status, obj) {
-  const body = JSON.stringify(obj);
-  res.writeHead(status, {
-    "content-type": "application/json",
-    "access-control-allow-origin": ALLOW_ORIGIN,
-    "access-control-allow-headers": "content-type",
+function corsHeaders(origin) {
+  const h = {
+    "access-control-allow-headers": "content-type, authorization",
     "access-control-allow-methods": "POST, GET, OPTIONS",
-  });
+    vary: "Origin",
+  };
+  if (ALLOW_ALL_ORIGINS) h["access-control-allow-origin"] = "*";
+  else if (origin && ALLOW_ORIGINS.includes(origin)) h["access-control-allow-origin"] = origin;
+  return h;
+}
+
+function send(res, status, obj, origin) {
+  const body = JSON.stringify(obj);
+  res.writeHead(status, { "content-type": "application/json", ...corsHeaders(origin) });
   res.end(body);
+}
+
+// --- in-memory rate limiter + daily generation cap ------------------------
+const PAID = new Set(["/api/generate-lore", "/api/regenerate-lore", "/api/generate-art"]);
+const hits = new Map(); // ip -> number[] (recent request timestamps, monotonic ms)
+let dayCount = 0;
+let dayStart = 0;
+
+function nowMs() { return Number(process.hrtime.bigint() / 1_000_000n); }
+
+function rateLimited(ip) {
+  const t = nowMs();
+  const arr = (hits.get(ip) || []).filter((ts) => t - ts < RATE_WINDOW_MS);
+  arr.push(t);
+  hits.set(ip, arr);
+  if (hits.size > 5000) hits.clear(); // crude memory bound
+  return arr.length > RATE_MAX;
+}
+
+function overDailyCap() {
+  const t = nowMs();
+  if (t - dayStart > 24 * 60 * 60 * 1000) { dayStart = t; dayCount = 0; }
+  if (dayCount >= MAX_GENERATIONS_PER_DAY) return true;
+  dayCount++;
+  return false;
 }
 
 function readBody(req, limitBytes = 25 * 1024 * 1024) {
@@ -209,18 +267,31 @@ const routes = {
 };
 
 const server = http.createServer(async (req, res) => {
-  if (req.method === "OPTIONS") { send(res, 204, {}); return; }
+  const origin = req.headers.origin;
+  if (req.method === "OPTIONS") { send(res, 204, {}, origin); return; }
   const url = new URL(req.url, "http://localhost");
   const routeKey = `${req.method} ${url.pathname}`;
   const handler = routes[routeKey];
-  if (!handler) { send(res, 404, { error: "not_found" }); return; }
+  if (!handler) { send(res, 404, { error: "not_found" }, origin); return; }
+
+  // Guards apply only to the paid, key-spending endpoints.
+  if (PAID.has(url.pathname)) {
+    if (API_TOKEN) {
+      const auth = req.headers.authorization || "";
+      if (auth !== `Bearer ${API_TOKEN}`) { send(res, 401, { error: "unauthorized" }, origin); return; }
+    }
+    const ip = (req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.socket.remoteAddress || "unknown";
+    if (rateLimited(ip)) { send(res, 429, { error: "rate_limited — slow down" }, origin); return; }
+    if (overDailyCap()) { send(res, 429, { error: "daily generation cap reached" }, origin); return; }
+  }
+
   try {
     const body = req.method === "POST" ? await readBody(req) : {};
     const result = await handler(body);
-    send(res, 200, result);
+    send(res, 200, result, origin);
   } catch (e) {
     console.error(routeKey, "failed:", e.message);
-    send(res, 500, { error: e.message || "server_error" });
+    send(res, 500, { error: e.message || "server_error" }, origin);
   }
 });
 

@@ -1,0 +1,29 @@
+# Render Blueprint for the Side Quest generation backend.
+# Deploy: push this repo to GitHub, then in Render → New → Blueprint, pick the
+# repo. Render reads this file. You'll be prompted for the two secret values
+# (ANTHROPIC_API_KEY, GOOGLE_API_KEY) — paste them in Render's dashboard; they
+# are never stored in the repo.
+services:
+  - type: web
+    name: sidequest-backend
+    runtime: node
+    plan: free
+    # No dependencies to install — the server uses only Node built-ins.
+    buildCommand: "echo no build step"
+    startCommand: "node server/index.mjs"
+    healthCheckPath: /api/health
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false            # prompted in dashboard; not committed
+      - key: GOOGLE_API_KEY
+        sync: false            # prompted in dashboard; not committed
+      - key: ALLOW_ORIGIN
+        value: https://wigilf.github.io   # lock CORS to the live site
+      - key: MAX_GENERATIONS_PER_DAY
+        value: "500"
+      - key: RATE_MAX
+        value: "30"
+      # Optional: set a shared token and the frontend's VITE_API_TOKEN to match,
+      # to gate the API to your own builds.
+      # - key: SIDEQUEST_API_TOKEN
+      #   generateValue: true
