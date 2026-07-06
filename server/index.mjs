@@ -213,10 +213,13 @@ async function generatePortrait({ photoDataUrl, themeStyle, lore, refineNote }) 
   const title = lore?.title || "a legendary hero";
   const typeLine = lore?.typeLine || "Legendary Creature";
   const prompt =
-    `Create a trading-card character portrait of the person in the photo, ` +
-    `reimagined as "${title}" — ${typeLine}. ` +
-    `Art style: ${styleBrief(themeStyle)}. Head-and-shoulders, dramatic lighting, ` +
-    `painterly, card-art framing, no text, no border. ${refineNote || ""}`.trim();
+    `Paint an ORIGINAL trading-card character illustration. Use the face in the photo ` +
+    `ONLY as a likeness reference — reimagine this person as the character "${title}" ` +
+    `(${typeLine}), fully in costume and in-world. Fully painted/illustrated — NOT a ` +
+    `photograph and NOT a plain headshot. Style: ${styleBrief(themeStyle)}. Heroic ` +
+    `head-and-shoulders hero framing, dramatic lighting, rich thematic background. ` +
+    `Keep their recognizable likeness. No text, no card border, no watermark. ` +
+    `${refineNote ? "Art direction: " + refineNote : ""}`.trim();
 
   const url =
     `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_IMAGE_MODEL}:generateContent?key=` +

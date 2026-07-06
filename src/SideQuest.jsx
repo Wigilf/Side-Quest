@@ -258,13 +258,14 @@ async function regenerateOneCard({ eventType, theme, questPrompt, card }) {
 // ("nano-banana") to turn the real face into a themed character portrait.
 // Otherwise we return a procedural themed backdrop and the card layers the raw
 // photo on top (see GameCard) — no Google key ever touches the browser.
-async function generateCardArt({ photoBase64, frameAccent, themeStyle, seedStr, lore }) {
+async function generateCardArt({ photoBase64, frameAccent, themeStyle, seedStr, lore, refineNote }) {
   if (API_BASE && photoBase64) {
     try {
       const d = await postJSON("/api/generate-art", {
         photoBase64,
         themeStyle,
         lore: { title: lore?.title, typeLine: lore?.typeLine },
+        refineNote: refineNote || "",
       });
       if (d && d.image) return d.image;
       throw new Error("no image");
@@ -517,10 +518,14 @@ function GameCard({ card, theme, art, photo, loadingArt, flipped, onFlip, onRege
 
       {/* refine controls (outside the flip) */}
       {(onRegenLore || onRegenArt) && flipped && (
-        <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
-          {onRegenArt && <button onClick={onRegenArt} disabled={busy} style={refineBtn(fr, busy)}>↻ Art</button>}
-          {onRegenLore && <button onClick={onRegenLore} disabled={busy} style={refineBtn(fr, busy)}>↻ Lore</button>}
-        </div>
+        AI_ENABLED && onRegenArt ? (
+          <CardRefiner fr={fr} busy={busy} onRegenArt={onRegenArt} onRegenLore={onRegenLore} />
+        ) : (
+          <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
+            {onRegenArt && <button onClick={() => onRegenArt()} disabled={busy} style={refineBtn(fr, busy)}>↻ Art</button>}
+            {onRegenLore && <button onClick={onRegenLore} disabled={busy} style={refineBtn(fr, busy)}>↻ Lore</button>}
+          </div>
+        )
       )}
     </div>
   );
@@ -528,6 +533,28 @@ function GameCard({ card, theme, art, photo, loadingArt, flipped, onFlip, onRege
 
 function refineBtn(fr, busy) {
   return { flex: 1, fontFamily: UI_FONT, fontSize: 12, fontWeight: 500, padding: "7px 8px", borderRadius: 7, cursor: busy ? "wait" : "pointer", color: "#e8e8f0", background: "rgba(0,0,0,0.4)", border: `1px solid ${fr.accent}66`, opacity: busy ? 0.5 : 1 };
+}
+
+// Per-card art editor: type a prompt to restyle THIS card's portrait.
+function CardRefiner({ fr, busy, onRegenArt, onRegenLore }) {
+  const [note, setNote] = useState("");
+  const go = () => { if (!busy) onRegenArt(note.trim()); };
+  return (
+    <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+      <input
+        value={note}
+        onChange={(e) => setNote(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Enter") go(); }}
+        disabled={busy}
+        placeholder="Restyle this card — e.g. 'give her golden dragon armor'"
+        style={{ width: "100%", boxSizing: "border-box", fontFamily: UI_FONT, fontSize: 12, padding: "8px 10px", borderRadius: 7, color: "#f0f0f6", background: "rgba(0,0,0,0.4)", border: `1px solid ${fr.accent}55` }}
+      />
+      <div style={{ display: "flex", gap: 6 }}>
+        <button onClick={go} disabled={busy} style={refineBtn(fr, busy)}>{busy ? "Painting…" : (note.trim() ? "✦ Apply" : "↻ New art")}</button>
+        {onRegenLore && <button onClick={onRegenLore} disabled={busy} style={refineBtn(fr, busy)}>↻ Lore</button>}
+      </div>
+    </div>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -754,13 +781,13 @@ export default function SideQuest() {
     } catch (e) { setError(e.message); } finally { setBusyCard(null); }
   }
 
-  async function regenArt(uid) {
+  async function regenArt(uid, refineNote) {
     setBusyCard(uid); setLoadingArt((s) => ({ ...s, [uid]: true }));
     try {
       const card = cards.find((c) => c.uid === uid);
       const part = participants.find((p) => p.id === card.pid);
       const frAccent = (CARD_FRAMES.find((f) => f.key === card.frame) || CARD_FRAMES[0]).accent;
-      const art = await generateCardArt({ photoBase64: part?.photo || null, frameAccent: frAccent, themeStyle: themeObj.style, seedStr: card.realName + card.title + Math.random(), lore: card });
+      const art = await generateCardArt({ photoBase64: part?.photo || null, frameAccent: frAccent, themeStyle: themeObj.style, seedStr: card.realName + card.title + Math.random(), lore: card, refineNote });
       setArts((s) => ({ ...s, [uid]: art }));
     } catch (e) { setError(e.message); } finally { setLoadingArt((s) => ({ ...s, [uid]: false })); setBusyCard(null); }
   }
@@ -943,7 +970,7 @@ export default function SideQuest() {
                     <GameCard key={c.uid} card={c} theme={themeObj} art={arts[c.uid]} loadingArt={loadingArt[c.uid]}
                       photo={(participants.find((p) => p.id === c.pid) || {}).photo || null}
                       flipped={!!flipped[c.uid]} onFlip={() => setFlipped((s) => ({ ...s, [c.uid]: !s[c.uid] }))}
-                      compact busy={busyCard === c.uid} onRegenLore={AI_ENABLED ? () => regenLore(c.uid) : undefined} onRegenArt={() => regenArt(c.uid)} />
+                      compact busy={busyCard === c.uid} onRegenLore={AI_ENABLED ? () => regenLore(c.uid) : undefined} onRegenArt={(note) => regenArt(c.uid, note)} />
                   ))}
                 </div>
               </>
