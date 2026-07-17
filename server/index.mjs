@@ -37,7 +37,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const PORT = Number(process.env.PORT || 8787);
 const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
-const GEMINI_IMAGE_MODEL = process.env.GEMINI_IMAGE_MODEL || "gemini-2.5-flash-image";
+// Nano Banana 2 (Gemini 3.1 Flash Image): 4K, up to 14 reference images, strong
+// identity preservation. Override with GEMINI_IMAGE_MODEL (e.g. gemini-3-pro-image-preview
+// for Nano Banana Pro, or gemini-2.5-flash-image for the older/cheaper Nano Banana).
+const GEMINI_IMAGE_MODEL = process.env.GEMINI_IMAGE_MODEL || "gemini-3.1-flash-image-preview";
 
 // --- Abuse / cost controls (these endpoints spend real money) --------------
 // ALLOW_ORIGIN: comma-separated allowlist, or "*". A browser request whose
