@@ -36,7 +36,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 })();
 
 const PORT = Number(process.env.PORT || 8787);
-const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
+// Sonnet 5: near-Opus quality at Sonnet speed/cost ($2/$10 per 1M intro through
+// 2026-08-31). Thinking is disabled below to keep lore generation snappy — Sonnet 5
+// turns adaptive thinking on by default, which would add latency to a user-facing call.
+const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-5";
 // Nano Banana 2 (Gemini 3.1 Flash Image, GA): $0.045/image — best quality/price for
 // card-sized art. Side-by-side vs Nano Banana Pro (gemini-3-pro-image, $0.134) showed
 // only a modest edge at card display size; set GEMINI_IMAGE_MODEL=gemini-3-pro-image
@@ -178,6 +181,7 @@ async function callClaude(prompt, { json = false, maxTokens = 1200 } = {}) {
     body: JSON.stringify({
       model: ANTHROPIC_MODEL,
       max_tokens: maxTokens,
+      thinking: { type: "disabled" }, // keep latency low for user-facing lore gen
       messages: [{ role: "user", content: (sys ? sys + "\n\n" : "") + prompt }],
     }),
   });
