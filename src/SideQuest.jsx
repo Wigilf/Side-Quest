@@ -112,12 +112,16 @@ const CATEGORY_PRESET_NAMES = ["NPCs", "Artifacts", "Spells", "Locations", "Crea
 let _specSeq = 0;
 function makeSpecCard(tpl = {}, i = 0) {
   _specSeq += 1;
-  return {
+  const card = {
     id: "sc_" + Date.now().toString(36) + "_" + _specSeq,
     frame: FRAME_KEYS[i % FRAME_KEYS.length],
     title: "", typeLine: "", cost: 1, power: 0, toughness: 0, ability: "", flavor: "",
     ...tpl,
   };
+  // GameCard renders flavor already wrapped in “quotes”, so strip any surrounding
+  // quotes the template or AI suggestion included to avoid double-quoting.
+  if (typeof card.flavor === "string") card.flavor = card.flavor.replace(/^[\s"'“”‘’]+|[\s"'“”‘’]+$/g, "");
+  return card;
 }
 
 // ---------------------------------------------------------------------------
@@ -832,7 +836,7 @@ function LoreGroup({ label, items, activeId, onPick }) {
   return (
     <div>
       <div style={{ fontFamily: UI_FONT, fontSize: 12, letterSpacing: 0.4, textTransform: "uppercase", color: "#8a8a98", marginBottom: 8 }}>{label}</div>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, maxHeight: 118, overflowY: "auto", padding: "1px 2px 4px" }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, padding: "1px 2px 4px" }}>
         {items.map((it) => (
           <button key={it.id} onClick={() => onPick(it.id)} style={loreChip(it.id === activeId)}>{it.icon} {it.name}</button>
         ))}
@@ -1433,7 +1437,7 @@ export default function SideQuest() {
         )}
       </div>
 
-      <div style={{ textAlign: "center", marginTop: 50, color: "#55555f", fontSize: 12 }}>Lore by Claude · Art by nano-banana (stubbed in this demo) · Side Quest MVP</div>
+      <div style={{ textAlign: "center", marginTop: 50, color: "#55555f", fontSize: 12 }}>Lore by Claude · Art by nano-banana · Side Quest</div>
 
       {showDecks && (
         <DecksModal decks={savedDecks} onClose={() => setShowDecks(false)} onOpen={openDeck} onDelete={deleteDeck} onNew={newDeck} />
