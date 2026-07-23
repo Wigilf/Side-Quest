@@ -120,6 +120,68 @@ function makeSpecCard(tpl = {}, i = 0) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// LORE LIBRARY — guided starting prompts. Pick a Setting (the world) and an
+// Occasion (the vibe); they compose into the quest textarea, then the user
+// personalizes. Combining one from each is the intended flow.
+// ---------------------------------------------------------------------------
+const SETTING_LORES = [
+  { id: "high-fantasy", icon: "🐉", name: "High Fantasy", text: "You are adventurers in the realm of Eldenmoor, a land of dragon-guarded taverns, scheming guilds, and cursed relics. Every quest is issued by the Guildmaster and rewards are paid in glory and mead. Quests should sound like medieval bounties: slaying \"beasts\" (mundane obstacles), retrieving \"artifacts\" (everyday objects), and charming \"nobles\" (strangers). Tone: epic, tongue-in-cheek, full of \"thee\" and \"thou.\"" },
+  { id: "cyberpunk", icon: "🌆", name: "Cyberpunk Future", text: "The year is 2189 in Neon City, where megacorps own the skyline and street runners trade favors in credits. Players are mercenary hackers taking contracts from a mysterious fixer known only as Ghost. Quests should read like black-market jobs: \"extract intel\" (get information from people), \"infiltrate a node\" (enter a venue), \"jack in\" (use tech in creative ways). Tone: gritty, neon-soaked, slang-heavy." },
+  { id: "ancient-greece", icon: "🏛️", name: "Ancient Greece", text: "Mount Olympus is bored, and the gods have descended to toy with mortals. Players are heroes competing for divine favor — each quest is a \"labor\" handed down by a different god (Dionysus assigns revelry, Hermes assigns trickery, Aphrodite assigns charm). Completing labors earns laurels; failing angers the Fates. Tone: mythic and grandiose, with dramatic epithets for every player." },
+  { id: "pirate", icon: "🏴‍☠️", name: "Pirate High Seas", text: "Ye be the crew of the Salty Siren, sailing cursed waters in search of the Lost Booty of Captain Marrow. Every quest is a heading on the treasure map: plundering \"ports\" (bars, shops), recruiting \"crew\" (strangers), and surviving \"krakens\" (challenges). Rum references encouraged. Tone: rowdy, superstitious, and full of pirate-speak." },
+  { id: "wild-west", icon: "🤠", name: "Wild West", text: "Welcome to Dustgulch, a lawless frontier town where fortunes are won at the card table and lost at high noon. Players are outlaws collecting bounties posted by the enigmatic Sheriff. Quests read like wanted posters: \"wrangle\" (convince someone of something), \"duel\" (challenge a friend), \"rob the stagecoach\" (acquire an item). Tone: drawling, dusty, and dramatic." },
+  { id: "noir", icon: "🕵️", name: "Noir Detective", text: "The city never sleeps, and neither do you. It's 1947, the rain won't quit, and every player is a private eye chasing leads in a case that goes all the way to the top. Quests are \"leads\" delivered in cryptic notes: tail a suspect, extract a confession, find the dame with the red scarf. Tone: hardboiled monologue, moody, cigarette-smoke metaphors." },
+  { id: "space-opera", icon: "🚀", name: "Space Opera", text: "Aboard the starship Vagrant Dawn, players are a misfit crew charting the outer rim. Mission Control (the deck) transmits directives: make first contact with \"alien species\" (strangers), harvest \"resources\" (drinks, snacks, objects), and repair \"hull breaches\" (fix awkward situations). Tone: dramatic captain's-log narration with beeping-console energy." },
+  { id: "post-apocalyptic", icon: "☢️", name: "Post-Apocalyptic", text: "The bombs fell decades ago. Players are wasteland scavengers surviving in the ruins, trading bottle caps and rumors. Quests come from a crackling radio voice called The Broadcaster: scavenge supplies, form alliances with rival factions (other groups of people), and defend the settlement. Tone: bleak but darkly funny, Mad Max meets Fallout." },
+  { id: "norse", icon: "⚔️", name: "Norse Saga", text: "Odin watches, and Valhalla only takes the worthy. Players are Viking warriors proving themselves through feats of strength, cunning, and feasting. Each quest is a \"saga verse\" to be earned: raid the \"mead hall\" (bar), best a rival in \"holmgang\" (any contest), earn a kenning (nickname) from a stranger. Tone: booming, boastful, skald-poetry flavored." },
+  { id: "egypt", icon: "🐫", name: "Ancient Egypt", text: "The Pharaoh has died without an heir, and the gods will crown whoever completes the Trials of the Nile. Players are priests, thieves, and nobles vying for the throne. Quests are trials inscribed on \"scrolls\": appease Anubis, decode omens, collect tribute. Completing trials earns scarabs. Tone: mysterious, ceremonial, curse-laden." },
+  { id: "feudal-japan", icon: "🏯", name: "Feudal Japan", text: "Players are wandering ronin and shadow-walking shinobi in a land of warring clans. The mysterious Daimyo issues missions via secret scrolls: gather intelligence in the \"tea house\" (any venue), master a discipline (a mini-challenge), move unseen (stealth-flavored social tasks). Honor is gained and lost with every quest. Tone: poetic, disciplined, with haiku-adjacent flourishes." },
+  { id: "victorian-gothic", icon: "🕯️", name: "Victorian Gothic", text: "Fog rolls over the cobblestones of Ravenshollow, where every mansion hides a secret and every guest may be a ghost. Players are paranormal investigators for the Society of the Veil. Quests are \"hauntings\" to resolve: commune with spirits (talk to strangers), collect cursed objects, survive the witching hour. Tone: ominous, candlelit, deliciously melodramatic." },
+  { id: "superhero", icon: "🦸", name: "Superhero City", text: "By day you're ordinary citizens; by night, Metro City's last line of defense. The Commissioner's hotline (the deck) dispatches emergencies: rescue civilians (help strangers), foil the villain (playful sabotage of friends), maintain your secret identity (covert tasks nobody can notice). Tone: comic-book bombast, POW-BAM energy, every player gets a hero name." },
+  { id: "secret-agent", icon: "🕴️", name: "Secret Agent", text: "Good evening, Agent. Your handler at the Agency has activated your cell for Operation Nightfall. Quests are classified missions: plant \"bugs\" (hide objects), make dead drops, extract information from \"assets\" (strangers) without blowing cover. Every quest self-destructs after reading. Tone: sleek, deadpan, martini-dry." },
+  { id: "lost-expedition", icon: "🧭", name: "Lost Expedition", text: "Players are members of the 1932 Royal Expedition into uncharted jungle, searching for the Golden Idol. The expedition journal (the deck) records objectives: catalog \"specimens\" (photos of odd things), trade with \"locals\" (strangers), avoid ancient traps (physical challenges). Tone: pith-helmet adventure serial, breathless and pulpy." },
+  { id: "fairy-tale", icon: "🧚", name: "Enchanted Fairy Tale", text: "Once upon a time, players wandered into the Whispering Woods, where a mischievous fairy cursed them: only by completing her whimsical tasks may they leave. Quests are riddles and mischief: earn a \"true smile\" from a stranger, gather magic ingredients, break tiny curses on friends. Tone: storybook-sweet with a wicked twinkle." },
+  { id: "mob-1930s", icon: "🎩", name: "1930s Mob", text: "The Family runs this town, and tonight you're all made members proving your loyalty to the Don. Quests are \"jobs\" whispered through the grapevine: collect debts (retrieve items), run numbers (counting/estimation challenges), earn respect at the speakeasy. Snitches get stitches. Tone: wise-guy slang, loyalty, cannoli." },
+  { id: "time-travelers", icon: "⏳", name: "Time Travelers", text: "The Timeline is fracturing, and players are agents of the Chrono Bureau sent to repair anachronisms. Each quest jumps eras: act like a caveman, toast like a Roman, dance like it's 1977, speak like the year 3000. Fix enough fractures and history survives. Tone: chaotic, era-hopping, gloriously confused." },
+];
+
+const EVENT_LORES = [
+  { id: "bachelor", icon: "🍻", name: "Bachelor Party", text: "Tonight, one man leaves bachelorhood forever — but not before his crew drags him through one final legendary campaign. The Groom is the Chosen One; everyone else is his party of guardians. Quests revolve around embarrassing (lovingly), celebrating, and testing the Groom: collect stories about him from strangers, complete challenges he must approve, and build the Legend of His Last Night. Tone: rowdy, brotherly, ceremonial." },
+  { id: "bachelorette", icon: "👑", name: "Bachelorette Party", text: "The Bride ascends the throne tomorrow — tonight, her court of honor completes the Rites of the Crown. Quests mix glam and chaos: gather \"blessings\" from strangers, complete dares the Bride assigns, protect the Bride's drink at all costs, and document everything for the sacred archive (group chat). Tone: glittery, dramatic, empowering, slightly unhinged." },
+  { id: "trip", icon: "✈️", name: "Trip with Friends", text: "You are a fellowship on a journey through foreign lands, and the trip itself is the campaign. Quests turn travel moments into objectives: befriend a local, eat something you can't pronounce, find the best viewpoint, haggle for a souvenir, navigate without GPS for an hour. Side quests unlock at airports, trains, and wrong turns. Tone: wanderlust-y, spontaneous, \"when in Rome.\"" },
+  { id: "drinking-game", icon: "🍺", name: "Drinking Game Night", text: "The Tavern Keeper (the deck) rules the table tonight, and every card is a decree. Quests are drinking challenges, toasts, and social gambits: invent a toast for the person to your left, defend your worst opinion or drink, speak in accents until your next turn. Refusal has a price (a sip, a dare, a forfeit). Always drink responsibly — water is a legal potion. Tone: mischievous, escalating, tavern-rules." },
+  { id: "house-party", icon: "🎉", name: "House Party", text: "The house is the dungeon, the rooms are its chambers, and the party is the raid. Quests send players across the map: charm the kitchen crowd, start a dance floor from nothing, discover a secret about the host, forge an alliance with someone you've never met. The night ends when the final boss (cleanup) is defeated or evaded. Tone: social, mischievous, room-by-room." },
+  { id: "birthday", icon: "🎂", name: "Birthday Party", text: "One hero levels up today, and the whole party plays in their honor. Quests orbit the Birthday Legend: collect birthday wishes in weird formats, complete challenges the Legend assigns from their throne, sing in unexpected places, find gifts that cost nothing. The Legend has veto power over everything. Tone: celebratory, worshipful, cake-obsessed." },
+  { id: "pub-crawl", icon: "🍸", name: "Pub Crawl", text: "Tonight you walk the Path of Five Taverns (or however many you survive). Each venue is a new level with its own quests: learn the bartender's name, earn a stranger's toast, adopt a new team member for one bar only, leave a positive review in rhyme. Bosses appear at closing time. Pace yourselves, hydrate between levels. Tone: episodic, escalating, map-based." },
+  { id: "music-festival", icon: "🎪", name: "Music Festival", text: "Players are pilgrims at the great gathering of sound. Quests use the festival as an open world: high-five your way to the front row, trade something with a stranger, learn a lyric from someone at a stage you'd never visit, find the weirdest outfit and compliment it sincerely, reunite the party when someone gets lost (they will). Tone: euphoric, sunburnt, communal." },
+  { id: "office-party", icon: "💼", name: "Office Party", text: "HR has no idea what's about to happen. Players are colleagues on a covert mission to make the work event actually fun. Quests are workplace-safe mischief: get a department you never talk to laughing, decode a coworker's hidden talent, use three pieces of corporate jargon in one sincere sentence, start a legend about the office. Tone: playful, inclusive, PG-13, promotion-safe." },
+  { id: "game-night", icon: "🎲", name: "Game Night", text: "The Council of the Table has convened. Between (or during) board games, the deck issues meta-quests: form a secret alliance, throw a round so subtly nobody notices, deliver a villain monologue when you win, defend the rules like a lawyer. Losing gracefully is a quest; winning obnoxiously is a war crime. Tone: competitive, theatrical, table-talk heavy." },
+  { id: "beach-day", icon: "🏖️", name: "Beach Day", text: "The Tide Council demands tribute. Players are castaways making the most of the shore: build something ambitious out of sand, initiate a game with a neighboring towel-tribe, retrieve \"treasure\" from the water, achieve perfect nap conditions, protect the snacks from seagull raiders. Tone: sun-drunk, lazy, salt-crusted." },
+  { id: "camping", icon: "⛺", name: "Camping Trip", text: "The wilderness has accepted your party — barely. Quests are trials of the wild: build the fire with style points, tell a story that genuinely spooks someone, identify one real constellation, cook something edible over flame, survive the night without checking your phone for an hour. The forest is always listening. Tone: cozy-spooky, s'mores-fueled, off-grid." },
+  { id: "nye", icon: "🎆", name: "New Year's Eve", text: "The old year is dying; the new one must be summoned properly. Quests count down the ritual: confess a resolution to a stranger, perform a eulogy for the old year, secure your midnight toast partner, learn how \"Happy New Year\" is said in three languages, be mid-quest when the clock strikes. Tone: reflective, sparkly, countdown-driven." },
+  { id: "wedding-reception", icon: "💍", name: "Wedding Reception", text: "Two houses unite tonight, and the guests are sworn to make it legendary. Quests are reception-safe missions: get a story about the couple from the oldest guest, dance with someone from \"the other side,\" deliver a one-sentence toast to a stranger, make a moment the photographer must capture. The couple is sacred; embarrassment must be aimed elsewhere. Tone: heartfelt, festive, aunt-friendly." },
+  { id: "ski-trip", icon: "🎿", name: "Ski Trip", text: "The Mountain judges all. Players are lodge-dwellers and slope warriors earning their après-ski honors: survive a run one level above your comfort zone (safely), learn a stranger's home mountain, achieve maximum hot-drink coziness, dramatize your best wipeout as an epic tale. Tone: crisp, boastful, fireplace-warm." },
+  { id: "halloween", icon: "🎃", name: "Halloween Party", text: "The Veil is thin tonight, and the deck speaks with the voice of Something Old. Quests are seasonal mischief: stay in character for a full conversation, get a stranger to explain their costume's lore, perform a dramatic reading of a spooky text, form a coven (alliance) with two other costumes. Tone: campy-creepy, theatrical, candy-powered." },
+  { id: "murder-mystery", icon: "🔪", name: "Murder Mystery Dinner", text: "Someone at this table is not who they claim to be — and by dessert, the truth will out. Players are guests at Blackwood Manor, each hiding a secret, and the deck plays the role of the omniscient Butler slipping notes under the door. Quests fuel suspicion and drama: plant a \"clue\" (object) near another guest, drop your assigned secret word into conversation without being caught, publicly accuse someone with a fully improvised motive, form a whispered alliance that lasts exactly one course, deliver an alibi nobody asked for. Courses act as acts of the play — tension must rise with each one, and the final course ends in a dramatic group verdict. Tone: candlelit, suspicious, deliciously overacted; everyone is guilty of something." },
+  { id: "road-trip", icon: "🚗", name: "Road Trip", text: "The Highway Spirit grants safe passage only to those who complete its trials. Quests unlock at gas stations, diners, and weird roadside attractions: rate a gas station snack like a sommelier, get the whole car singing one song, photograph the strangest sign, befriend a diner regular, navigate one stretch by vibes alone (passengers only — driver stays sacred). Tone: open-road, quirky, mile-marker episodic." },
+  { id: "family-reunion", icon: "👨‍👩‍👧‍👦", name: "Family Reunion", text: "The Elders have gathered, the Cousins have assembled, and the deck is the family's secret game master. Quests bridge generations: extract an embarrassing story about a parent from a grandparent, learn a family recipe step, get three generations in one photo doing the same pose, settle (or reignite) a legendary family debate. Tone: warm, nostalgic, gently chaotic." },
+];
+
+// Pre-seed the lore library from the Event/World the user already picked so the
+// Quest step arrives with a coherent suggestion rather than a blank slate.
+const THEME_TO_SETTING = { starwars: "space-opera", lotr: "high-fantasy", onepiece: "pirate", cyber: "cyberpunk", noir: "noir" };
+const EVENT_TO_OCCASION = { bachelor: "bachelor", trip: "trip", party: "house-party", drinking: "drinking-game", wedding: "wedding-reception", corporate: "office-party" };
+
+function composeLore(settingId, occasionId) {
+  const s = SETTING_LORES.find((x) => x.id === settingId);
+  const o = EVENT_LORES.find((x) => x.id === occasionId);
+  const parts = [];
+  if (s) parts.push(s.text);
+  if (o) parts.push(o.text);
+  return parts.length ? parts.join("\n\n") + "\n\n— Make it yours: name the guest(s) of honor, the place, and a couple of inside jokes." : "";
+}
+
 // Pre-built example so a pitch can jump straight to the payoff.
 const DEMO = {
   user: { name: "Marco", email: "marco@sidequest.gg" },
@@ -743,6 +805,39 @@ function DeckBuilder({ theme, categories, suggestingCat, aiEnabled, onAddCategor
 }
 
 // ---------------------------------------------------------------------------
+// LORE LIBRARY — Setting + Occasion pickers that compose the quest prompt
+// ---------------------------------------------------------------------------
+function loreChip(active) {
+  return {
+    fontFamily: UI_FONT, fontSize: 13, padding: "7px 12px", borderRadius: 999,
+    cursor: "pointer", whiteSpace: "nowrap",
+    color: active ? "#0b0b12" : "#dcdce4",
+    background: active ? "#f3cf5b" : "rgba(255,255,255,0.05)",
+    border: `1px solid ${active ? "#f3cf5b" : "#3a3a45"}`,
+    fontWeight: active ? 700 : 500, transition: "all .15s",
+  };
+}
+function LoreLibrary({ settingId, occasionId, onPickSetting, onPickOccasion }) {
+  const Group = ({ label, items, activeId, onPick }) => (
+    <div>
+      <div style={{ fontFamily: UI_FONT, fontSize: 12, letterSpacing: 0.4, textTransform: "uppercase", color: "#8a8a98", marginBottom: 8 }}>{label}</div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, maxHeight: 118, overflowY: "auto", padding: "1px 2px 4px" }}>
+        {items.map((it) => (
+          <button key={it.id} onClick={() => onPick(it.id)} style={loreChip(it.id === activeId)}>{it.icon} {it.name}</button>
+        ))}
+      </div>
+    </div>
+  );
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16, marginBottom: 18, padding: 16, borderRadius: 12, border: "1px solid #2a2a33", background: "rgba(255,255,255,0.02)" }}>
+      <div style={{ fontSize: 13, color: "#c8c8d4", lineHeight: 1.4 }}>✨ Pick a <strong>setting</strong> and an <strong>occasion</strong> to auto-write a starting prompt — then personalize it below. Tap again to deselect.</div>
+      <Group label="Setting — the world" items={SETTING_LORES} activeId={settingId} onPick={onPickSetting} />
+      <Group label="Occasion — the vibe" items={EVENT_LORES} activeId={occasionId} onPick={onPickOccasion} />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // MAIN APP
 // ---------------------------------------------------------------------------
 
@@ -758,6 +853,8 @@ export default function SideQuest() {
   const [participants, setParticipants] = useState([]);
 
   const [questCard, setQuestCard] = useState(null);
+  const [loreSetting, setLoreSetting] = useState(null);   // selected Setting lore id
+  const [loreOccasion, setLoreOccasion] = useState(null); // selected Occasion lore id
   const [categories, setCategories] = useState([]); // [{ id, name, cards: [specCard] }]
   const [suggestingCat, setSuggestingCat] = useState(null); // category id currently fetching AI suggestions
   const [cards, setCards] = useState([]);
@@ -847,7 +944,7 @@ export default function SideQuest() {
       setUser(d.user || { name: "", email: "" });
       setEventType(d.eventType); setTheme(d.theme); setQuestPrompt(d.questPrompt || "");
       setParticipants(d.participants || []); setQuestCard(d.questCard || null);
-      setCategories(d.categories || []);
+      setCategories(d.categories || []); setLoreSetting(null); setLoreOccasion(null);
       // Backfill uid/pid for decks saved before these fields existed. Category
       // (spec) cards already carry uid/pid — preserve them; only backfill true
       // character cards that predate the field, and never pin a spec card to a
@@ -872,11 +969,35 @@ export default function SideQuest() {
   function newDeck() {
     setCurrentDeckId(null); setUser({ name: "", email: "" }); setEventType(null);
     setTheme(null); setQuestPrompt(""); setParticipants([]); setQuestCard(null); setCategories([]);
+    setLoreSetting(null); setLoreOccasion(null);
     setCards([]); setArts({}); setFlipped({}); setGenState("idle"); setOrderPlaced(false); setPhotoConsent(false);
     setShowDecks(false); setLanding(false); setStep(0);
   }
 
   const themeObj = THEMES.find((t) => t.id === theme) || THEMES[1];
+
+  // Pre-seed the lore library from the earlier Event/World picks the first time
+  // the user reaches the Quest step with an empty prompt.
+  useEffect(() => {
+    if (step === 2 && loreSetting == null && loreOccasion == null && !questPrompt.trim()) {
+      const s = THEME_TO_SETTING[theme] || null;
+      const o = EVENT_TO_OCCASION[eventType] || null;
+      if (s || o) { setLoreSetting(s); setLoreOccasion(o); setQuestPrompt(composeLore(s, o)); }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step]);
+
+  // Picking a Setting/Occasion (re)composes the quest textarea from the two lores.
+  function pickSetting(id) {
+    const next = id === loreSetting ? null : id;
+    setLoreSetting(next);
+    setQuestPrompt(composeLore(next, loreOccasion));
+  }
+  function pickOccasion(id) {
+    const next = id === loreOccasion ? null : id;
+    setLoreOccasion(next);
+    setQuestPrompt(composeLore(loreSetting, next));
+  }
 
   function addParticipant() {
     setParticipants((p) => [...p, { id: Date.now() + Math.random(), name: "", photo: null }]);
@@ -1140,8 +1261,9 @@ export default function SideQuest() {
 
         {/* STEP 2: QUEST */}
         {step === 2 && (
-          <Panel title="Describe the quest" sub="The goal, the vibe, the inside jokes. Claude turns this into your deck's lore.">
-            <textarea value={questPrompt} onChange={(e) => setQuestPrompt(e.target.value)} rows={6}
+          <Panel title="Describe the quest" sub="Start from a lore template, or write your own. Claude turns this into your deck's lore.">
+            <LoreLibrary settingId={loreSetting} occasionId={loreOccasion} onPickSetting={pickSetting} onPickOccasion={pickOccasion} />
+            <textarea value={questPrompt} onChange={(e) => setQuestPrompt(e.target.value)} rows={8}
               placeholder="e.g. Dave's bachelor party in Lisbon. Complete dares across the city to 'earn back' his freedom before the wedding. He fears seagulls and loves bad karaoke."
               style={{ ...inputStyle, resize: "vertical", lineHeight: 1.5 }} />
             <div style={{ fontSize: 12, color: "#7a7a88", marginTop: 8 }}>Tip: name the guest of honor, the place, and a couple personal details for sharper cards.</div>
