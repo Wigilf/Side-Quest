@@ -167,7 +167,7 @@ async function deckDelete(ctx, id) {
 
 async function callClaude(prompt, { json = false, maxTokens = 1200 } = {}) {
   const key = process.env.ANTHROPIC_API_KEY;
-  if (!key) throw new Error("ANTHROPIC_API_KEY is not set on the server");
+  if (!key) throw new Error("Lore service is not configured");
   const sys = json
     ? "You respond ONLY with valid minified JSON. No markdown, no code fences, no preamble."
     : "";
@@ -187,7 +187,8 @@ async function callClaude(prompt, { json = false, maxTokens = 1200 } = {}) {
   });
   if (!res.ok) {
     const detail = await res.text().catch(() => "");
-    throw new Error(`Anthropic API error ${res.status}: ${detail.slice(0, 300)}`);
+    console.error("lore upstream error", res.status, detail.slice(0, 300));
+    throw new Error(`Lore service error (${res.status})`);
   }
   const data = await res.json();
   const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
@@ -213,7 +214,7 @@ function styleBrief(t) {
 // part, optionally preceded by an inline_data image). Returns a data URL.
 async function callGeminiImage(parts) {
   const key = process.env.GOOGLE_API_KEY;
-  if (!key) throw new Error("GOOGLE_API_KEY is not set on the server");
+  if (!key) throw new Error("Art service is not configured");
   const url =
     `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_IMAGE_MODEL}:generateContent?key=` +
     encodeURIComponent(key);
@@ -224,13 +225,14 @@ async function callGeminiImage(parts) {
   });
   if (!res.ok) {
     const detail = await res.text().catch(() => "");
-    throw new Error(`Gemini image error ${res.status}: ${detail.slice(0, 300)}`);
+    console.error("art upstream error", res.status, detail.slice(0, 300));
+    throw new Error(`Art service error (${res.status})`);
   }
   const body = await res.json();
   const outParts = body?.candidates?.[0]?.content?.parts || [];
   const img = outParts.find((p) => p.inline_data || p.inlineData);
   const inline = img?.inline_data || img?.inlineData;
-  if (!inline?.data) throw new Error("Gemini returned no image (content may have been declined)");
+  if (!inline?.data) throw new Error("Art service returned no image (content may have been declined)");
   const outMime = inline.mime_type || inline.mimeType || "image/png";
   return `data:${outMime};base64,${inline.data}`;
 }

@@ -1230,7 +1230,7 @@ export default function SideQuest() {
             )}
           </div>
           <div className="ql-fade" style={{ marginTop: 56, display: "flex", gap: 30, justifyContent: "center", flexWrap: "wrap", color: "#7a7a88", fontSize: 13, animationDelay: ".4s" }}>
-            {["Born at a real bachelor party", "Lore by Claude", "Art by nano-banana", "Shipped to your door"].map((x) => (
+            {["Born at a real bachelor party", "AI-written lore", "AI-painted portraits", "Shipped to your door"].map((x) => (
               <span key={x} style={{ display: "flex", alignItems: "center", gap: 7 }}><span style={{ color: "#d8b24a" }}>◆</span>{x}</span>
             ))}
           </div>
@@ -1262,7 +1262,7 @@ export default function SideQuest() {
 
         {/* STEP 0: QUEST (world + occasion + description) */}
         {step === 0 && (
-          <Panel title="Set the scene" sub="Start from a template below, or just write your own quest — either way Claude turns it into your deck's lore.">
+          <Panel title="Set the scene" sub="Start from a template below, or just write your own quest — either way Side Quest turns it into your deck's lore.">
             <LoreLibrary settingId={loreSetting} occasionId={loreOccasion} onPickSetting={pickSetting} onPickOccasion={pickOccasion} />
             <CardStylePicker themeId={theme || "lotr"} onPick={setTheme} />
             <div style={{ fontFamily: UI_FONT, fontSize: 12, letterSpacing: 0.4, textTransform: "uppercase", color: "#8a8a98", marginBottom: 8 }}>Your quest</div>
@@ -1336,7 +1336,7 @@ export default function SideQuest() {
         {/* STEP 3: REVEAL */}
         {step === 3 && (
           <div>
-            {genState === "lore" && <BigLoader label="Claude is writing your deck's lore…" />}
+            {genState === "lore" && <BigLoader label="Side Quest is writing your deck's lore…" />}
             {(genState === "art" || genState === "done") && (
               <>
                 {questCard && (
@@ -1420,7 +1420,7 @@ export default function SideQuest() {
         )}
       </div>
 
-      <div style={{ textAlign: "center", marginTop: 50, color: "#55555f", fontSize: 12 }}>Lore by Claude · Art by nano-banana · Side Quest</div>
+      <div style={{ textAlign: "center", marginTop: 50, color: "#55555f", fontSize: 12 }}>✦ Lore &amp; art by Side Quest ✦</div>
 
       {showDecks && (
         <DecksModal decks={savedDecks} onClose={() => setShowDecks(false)} onOpen={openDeck} onDelete={deleteDeck} onNew={newDeck} />
