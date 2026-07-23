@@ -410,18 +410,23 @@ function GhostButton({ children, onClick, style }) {
 // THEME-ADAPTIVE FLIP CARD
 // ---------------------------------------------------------------------------
 
-function GameCard({ card, theme, art, photo, loadingArt, flipped, onFlip, onRegenLore, onRegenArt, busy, compact }) {
+function GameCard({ card, theme, art, photo, loadingArt, flipped, onFlip, onExpand, onRegenLore, onRegenArt, busy, compact, w }) {
   const fr = CARD_FRAMES.find((f) => f.key === card.frame) || CARD_FRAMES[0];
   const t = theme;
   // Show the raw uploaded face only when the art is the procedural backdrop
   // (an SVG). A real AI portrait (raster png/jpeg) already contains the face.
   const showPhoto = photo && (!art || (typeof art === "string" && art.startsWith("data:image/svg")));
-  const W = compact ? 232 : 300;
+  const W = w || (compact ? 232 : 300);
   const scale = W / 300;
+  const H = Math.round(440 * scale);
   const corner = (t.corner || 10) * scale;
+  // Portraits are head-and-shoulders; the art window is wider than tall, so a
+  // centered crop lops off the top of the head. Bias the crop upward so the
+  // face stays fully visible.
+  const artPos = "center 22%";
 
   return (
-    <div style={{ width: W, perspective: 1200 }}>
+    <div style={{ width: W, perspective: 1200 }} onDoubleClick={onExpand}>
       <div
         onClick={onFlip}
         role={onFlip ? "button" : undefined}
@@ -429,7 +434,7 @@ function GameCard({ card, theme, art, photo, loadingArt, flipped, onFlip, onRege
         aria-label={onFlip ? `Flip ${card.realName}'s card` : undefined}
         onKeyDown={onFlip ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onFlip(); } } : undefined}
         style={{
-          position: "relative", width: "100%", height: (compact ? 340 : 440),
+          position: "relative", width: "100%", height: H,
           transformStyle: "preserve-3d", transition: "transform .7s cubic-bezier(.2,.8,.2,1)",
           transform: flipped ? "rotateY(0deg)" : "rotateY(180deg)", cursor: onFlip ? "pointer" : "default",
         }}
@@ -482,9 +487,9 @@ function GameCard({ card, theme, art, photo, loadingArt, flipped, onFlip, onRege
             ) : (art || photo) ? (
               <>
                 {/* AI portrait or themed backdrop */}
-                {art && <img src={art} alt="" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }} />}
+                {art && <img src={art} alt="" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", objectPosition: artPos }} />}
                 {/* real face, layered over the procedural backdrop when there's no AI art */}
-                {showPhoto && <img src={photo} alt={card.realName} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }} />}
+                {showPhoto && <img src={photo} alt={card.realName} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", objectPosition: artPos }} />}
                 {/* theme tint so the portrait blends into the card frame */}
                 {showPhoto && <div style={{ position: "absolute", inset: 0, pointerEvents: "none", background: `radial-gradient(120% 80% at 50% 18%, ${fr.accent}22, transparent 55%), linear-gradient(180deg, transparent 45%, ${t.bg[0]}dd 100%)` }} />}
               </>
@@ -557,6 +562,59 @@ function CardRefiner({ fr, busy, onRegenArt, onRegenLore }) {
   );
 }
 
+// Enlarged view: a big card + editable fields. Opens on double-click of a card.
+function CardEditorModal({ card, theme, art, photo, loadingArt, busy, onClose, onChange, onRegenArt, onRegenLore }) {
+  const fr = CARD_FRAMES.find((f) => f.key === card.frame) || CARD_FRAMES[0];
+  const [note, setNote] = useState("");
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  const lbl = { display: "block", fontFamily: UI_FONT, fontSize: 11, letterSpacing: 0.4, textTransform: "uppercase", color: "#9a9aa8", marginBottom: 4 };
+  const inp = { width: "100%", boxSizing: "border-box", fontFamily: UI_FONT, fontSize: 13, padding: "8px 10px", borderRadius: 8, color: "#f0f0f6", background: "rgba(0,0,0,0.4)", border: `1px solid ${fr.accent}55`, outline: "none" };
+  const setText = (k) => (e) => onChange({ [k]: e.target.value });
+  const setNum = (k) => (e) => onChange({ [k]: e.target.value.replace(/[^0-9]/g, "").slice(0, 3) });
+  const applyArt = () => { if (!busy && onRegenArt) onRegenArt(note.trim()); };
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(5,4,10,0.78)", backdropFilter: "blur(6px)", zIndex: 60, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "40px 20px", overflowY: "auto" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ display: "flex", gap: 28, flexWrap: "wrap", justifyContent: "center", alignItems: "flex-start", maxWidth: 820 }}>
+        <GameCard card={card} theme={theme} art={art} photo={photo} loadingArt={loadingArt} flipped w={360} />
+        <div style={{ width: 380, maxWidth: "100%", background: "rgba(18,16,26,0.97)", border: `1px solid ${fr.accent}44`, borderRadius: 16, padding: 22, boxShadow: "0 24px 60px rgba(0,0,0,0.6)" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+            <div style={{ fontFamily: theme.displayFont, fontWeight: 700, fontSize: 18, color: "#f4f4fa" }}>Edit card</div>
+            <button onClick={onClose} aria-label="Close" style={{ background: "transparent", border: "none", color: "#c8c8d4", fontSize: 24, cursor: "pointer", lineHeight: 1, padding: 0 }}>×</button>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div><label style={lbl}>Title</label><input style={inp} value={card.title || ""} onChange={setText("title")} /></div>
+            <div><label style={lbl}>Type line</label><input style={inp} value={card.typeLine || ""} onChange={setText("typeLine")} /></div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <div style={{ flex: 1 }}><label style={lbl}>Cost</label><input style={inp} inputMode="numeric" value={card.cost ?? ""} onChange={setNum("cost")} /></div>
+              <div style={{ flex: 1 }}><label style={lbl}>Power</label><input style={inp} inputMode="numeric" value={card.power ?? ""} onChange={setNum("power")} /></div>
+              <div style={{ flex: 1 }}><label style={lbl}>Tough</label><input style={inp} inputMode="numeric" value={card.toughness ?? ""} onChange={setNum("toughness")} /></div>
+            </div>
+            <div><label style={lbl}>Ability</label><textarea style={{ ...inp, minHeight: 72, resize: "vertical", lineHeight: 1.35 }} value={card.ability || ""} onChange={setText("ability")} /></div>
+            <div><label style={lbl}>Flavor</label><textarea style={{ ...inp, minHeight: 52, resize: "vertical", lineHeight: 1.35, fontStyle: "italic" }} value={card.flavor || ""} onChange={setText("flavor")} /></div>
+            {(onRegenArt || onRegenLore) && (
+              <div style={{ borderTop: `1px solid ${fr.accent}22`, paddingTop: 14, display: "flex", flexDirection: "column", gap: 8 }}>
+                <label style={lbl}>AI restyle</label>
+                {onRegenArt && (
+                  <input value={note} onChange={(e) => setNote(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") applyArt(); }} disabled={busy} placeholder="Restyle the art — e.g. 'add golden dragon armor'" style={inp} />
+                )}
+                <div style={{ display: "flex", gap: 8 }}>
+                  {onRegenArt && <button onClick={applyArt} disabled={busy} style={refineBtn(fr, busy)}>{busy ? "Painting…" : (note.trim() ? "✦ Apply art" : "↻ New art")}</button>}
+                  {onRegenLore && <button onClick={onRegenLore} disabled={busy} style={refineBtn(fr, busy)}>↻ New lore</button>}
+                </div>
+              </div>
+            )}
+            <button onClick={onClose} style={{ marginTop: 6, padding: "11px", borderRadius: 10, border: "none", background: fr.accent, color: theme.bg[0], fontFamily: UI_FONT, fontWeight: 700, fontSize: 14, cursor: "pointer" }}>Done</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // MAIN APP
 // ---------------------------------------------------------------------------
@@ -577,6 +635,7 @@ export default function SideQuest() {
   const [arts, setArts] = useState({});
   const [loadingArt, setLoadingArt] = useState({});
   const [flipped, setFlipped] = useState({}); // realName -> bool
+  const [editingUid, setEditingUid] = useState(null); // uid of card open in the enlarge/edit modal
   const [genState, setGenState] = useState("idle");
   const [error, setError] = useState("");
   const [busyCard, setBusyCard] = useState(null);
@@ -770,6 +829,11 @@ export default function SideQuest() {
     });
   }
 
+  // Merge manual field edits (from the enlarge/edit modal) into a card.
+  function updateCard(uid, patch) {
+    setCards((cs) => cs.map((c) => (c.uid === uid ? { ...c, ...patch } : c)));
+  }
+
   async function regenLore(uid) {
     setBusyCard(uid);
     try {
@@ -954,7 +1018,7 @@ export default function SideQuest() {
                   </div>
                 )}
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
-                  <SectionLabel>{genState === "art" ? "Dealing your deck…" : "Your deck — tap a card to flip, refine below"}</SectionLabel>
+                  <SectionLabel>{genState === "art" ? "Dealing your deck…" : "Your deck — tap to flip · double-click to enlarge & edit"}</SectionLabel>
                   {genState === "done" && (
                     <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
                       <GhostButton onClick={() => setStep(3)}>← Edit cast</GhostButton>
@@ -970,6 +1034,7 @@ export default function SideQuest() {
                     <GameCard key={c.uid} card={c} theme={themeObj} art={arts[c.uid]} loadingArt={loadingArt[c.uid]}
                       photo={(participants.find((p) => p.id === c.pid) || {}).photo || null}
                       flipped={!!flipped[c.uid]} onFlip={() => setFlipped((s) => ({ ...s, [c.uid]: !s[c.uid] }))}
+                      onExpand={() => setEditingUid(c.uid)}
                       compact busy={busyCard === c.uid} onRegenLore={AI_ENABLED ? () => regenLore(c.uid) : undefined} onRegenArt={(note) => regenArt(c.uid, note)} />
                   ))}
                 </div>
@@ -1030,6 +1095,21 @@ export default function SideQuest() {
 
       {showDecks && (
         <DecksModal decks={savedDecks} onClose={() => setShowDecks(false)} onOpen={openDeck} onDelete={deleteDeck} onNew={newDeck} />
+      )}
+
+      {editingUid && cards.find((c) => c.uid === editingUid) && (
+        <CardEditorModal
+          card={cards.find((c) => c.uid === editingUid)}
+          theme={themeObj}
+          art={arts[editingUid]}
+          photo={(participants.find((p) => p.id === (cards.find((c) => c.uid === editingUid) || {}).pid) || {}).photo || null}
+          loadingArt={loadingArt[editingUid]}
+          busy={busyCard === editingUid}
+          onClose={() => setEditingUid(null)}
+          onChange={(patch) => updateCard(editingUid, patch)}
+          onRegenArt={(note) => regenArt(editingUid, note)}
+          onRegenLore={AI_ENABLED ? () => regenLore(editingUid) : undefined}
+        />
       )}
     </div>
   );
