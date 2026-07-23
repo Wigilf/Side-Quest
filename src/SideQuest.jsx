@@ -81,7 +81,7 @@ const CARD_FRAMES = [
   { key: "violet", accent: "#b15bef" },
 ];
 
-const STEPS = ["Event", "World", "Quest", "Cast", "Build", "Reveal", "Order"];
+const STEPS = ["Quest", "Cast", "Build", "Reveal", "Order"];
 
 // Deck Builder — non-character card categories. Each preset ships with a couple
 // of static template cards (an instant starting ground); "Suggest from lore"
@@ -939,7 +939,7 @@ export default function SideQuest() {
     if (!cards.length) return;
     setSaveState("saving");
     const id = currentDeckId || "deck_" + Date.now();
-    const name = questPrompt.slice(0, 42) || (EVENT_TYPES.find((e) => e.id === eventType)?.label ?? "Untitled deck");
+    const name = questPrompt.slice(0, 42) || eventType || "Untitled deck";
     const payload = { id, name, user, eventType, theme, questPrompt, participants, categories, questCard, cards, arts, updatedAt: Date.now() };
     try {
       await window.storage.set("deck:" + id, JSON.stringify(payload));
@@ -974,7 +974,7 @@ export default function SideQuest() {
       setCards(loaded); setArts(d.arts || {});
       const fl = {}; loaded.forEach((c) => (fl[c.uid] = true)); setFlipped(fl);
       setCurrentDeckId(d.id); setGenState("done"); setShowDecks(false);
-      setLanding(false); setStep(5);
+      setLanding(false); setStep(3);
     } catch (e) { setError("Couldn't open that deck."); }
   }
 
@@ -994,29 +994,20 @@ export default function SideQuest() {
 
   const themeObj = THEMES.find((t) => t.id === theme) || THEMES[1];
 
-  // Pre-seed the lore library from the earlier Event/World picks the first time
-  // the user reaches the Quest step with an empty prompt.
-  useEffect(() => {
-    if (step === 2 && loreSetting == null && loreOccasion == null && !questPrompt.trim()) {
-      const s = THEME_TO_SETTING[theme] || null;
-      const o = EVENT_TO_OCCASION[eventType] || null;
-      if (s || o) { setLoreSetting(s); setLoreOccasion(o); setQuestPrompt(composeLore(s, o)); }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step]);
-
   // Picking a Setting/Occasion (re)composes the quest textarea from the two lores.
+  // Setting also drives the visual theme; Occasion also sets the event context.
   function pickSetting(id) {
     const next = id === loreSetting ? null : id;
     setLoreSetting(next);
     setQuestPrompt(composeLore(next, loreOccasion));
-    // Keep the card look aligned with the chosen world (overridable in the World step).
     if (next && SETTING_TO_THEME[next]) setTheme(SETTING_TO_THEME[next]);
   }
   function pickOccasion(id) {
     const next = id === loreOccasion ? null : id;
     setLoreOccasion(next);
     setQuestPrompt(composeLore(loreSetting, next));
+    const occ = EVENT_LORES.find((o) => o.id === next);
+    setEventType(occ ? occ.name : null);
   }
 
   function addParticipant() {
@@ -1034,8 +1025,8 @@ export default function SideQuest() {
   }
 
   async function runGeneration(override) {
-    const src = override || { eventType, theme, questPrompt, participants, categories };
-    setError(""); setGenState("lore"); setStep(5); setFlipped({});
+    const src = override || { eventType: eventType || "an event", theme, questPrompt, participants, categories };
+    setError(""); setGenState("lore"); setStep(3); setFlipped({});
     try {
       // --- Lore: live Claude call, with a baked-in fallback for stage safety ---
       let lore;
@@ -1092,7 +1083,7 @@ export default function SideQuest() {
   function autoSave(src, qCard, ordered) {
     setArts((curArts) => {
       const id = currentDeckId || "deck_" + Date.now();
-      const name = (src.questPrompt || "").slice(0, 42) || (EVENT_TYPES.find((e) => e.id === src.eventType)?.label ?? "Untitled deck");
+      const name = (src.questPrompt || "").slice(0, 42) || src.eventType || "Untitled deck";
       const payload = { id, name, user: src.user || user, eventType: src.eventType, theme: src.theme, questPrompt: src.questPrompt, participants: src.participants, categories: src.categories || [], questCard: qCard, cards: ordered, arts: curArts, updatedAt: Date.now() };
       (async () => {
         try {
@@ -1181,10 +1172,8 @@ export default function SideQuest() {
   }
 
   const canNext = {
-    0: !!eventType,
-    1: !!theme,
-    2: questPrompt.trim().length > 8,
-    3: participants.length > 0 && participants.every((p) => p.name.trim()) &&
+    0: questPrompt.trim().length > 8,
+    1: participants.length > 0 && participants.every((p) => p.name.trim()) &&
        (!participants.some((p) => p.photo) || photoConsent),
   };
 
@@ -1245,54 +1234,20 @@ export default function SideQuest() {
           <div style={{ background: "rgba(239,91,107,0.12)", border: "1px solid #ef5b6b", color: "#ffc4cb", padding: "12px 16px", borderRadius: 10, marginBottom: 20, fontSize: 14 }}>⚠ {error}</div>
         )}
 
-        {/* STEP 0: EVENT */}
+        {/* STEP 0: QUEST (world + occasion + description) */}
         {step === 0 && (
-          <Panel title="What's the occasion?" sub="Pick the kind of event you're building for.">
-            <div style={grid(240)}>
-              {EVENT_TYPES.map((e) => (
-                <SelectCard key={e.id} active={eventType === e.id} onClick={() => setEventType(e.id)} icon={e.icon} title={e.label} hint={e.hint} />
-              ))}
-            </div>
-            <NavRow onNext={() => setStep(1)} nextOk={canNext[0]} />
-          </Panel>
-        )}
-
-        {/* STEP 1: WORLD */}
-        {step === 1 && (
-          <Panel title="Choose a world" sub="The lore, the fonts, and the card style all adapt to this.">
-            <div style={grid(200)}>
-              {THEMES.map((t) => (
-                <button key={t.id} onClick={() => setTheme(t.id)} className="ql-fade" style={{
-                  textAlign: "left", cursor: "pointer", borderRadius: 14, padding: 16, overflow: "hidden",
-                  border: `1.5px solid ${theme === t.id ? "#f3cf5b" : "#33333e"}`,
-                  background: theme === t.id ? "rgba(243,207,91,0.08)" : "rgba(255,255,255,0.02)", transition: "all .2s",
-                }}>
-                  <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
-                    {t.swatch.map((c, i) => <div key={i} style={{ width: 26, height: 26, borderRadius: 6, background: c, border: "1px solid rgba(255,255,255,0.1)" }} />)}
-                  </div>
-                  <div style={{ fontFamily: t.displayFont, fontSize: 18, fontWeight: 700, color: t.accent }}>{t.label}</div>
-                  <div style={{ color: "#9a9aa8", fontSize: 13, marginTop: 2 }}>{t.sub}</div>
-                </button>
-              ))}
-            </div>
-            <NavRow onBack={() => setStep(0)} onNext={() => setStep(2)} nextOk={canNext[1]} />
-          </Panel>
-        )}
-
-        {/* STEP 2: QUEST */}
-        {step === 2 && (
-          <Panel title="Describe the quest" sub="Start from a lore template, or write your own. Claude turns this into your deck's lore.">
+          <Panel title="Set the scene" sub="Choose a world and an occasion — that sets both the card style and the story — or write your own. Claude turns it into your deck's lore.">
             <LoreLibrary settingId={loreSetting} occasionId={loreOccasion} onPickSetting={pickSetting} onPickOccasion={pickOccasion} />
             <textarea value={questPrompt} onChange={(e) => setQuestPrompt(e.target.value)} rows={8}
               placeholder="e.g. Dave's bachelor party in Lisbon. Complete dares across the city to 'earn back' his freedom before the wedding. He fears seagulls and loves bad karaoke."
               style={{ ...inputStyle, resize: "vertical", lineHeight: 1.5 }} />
             <div style={{ fontSize: 12, color: "#7a7a88", marginTop: 8 }}>Tip: name the guest of honor, the place, and a couple personal details for sharper cards.</div>
-            <NavRow onBack={() => setStep(1)} onNext={() => setStep(3)} nextOk={canNext[2]} />
+            <NavRow onNext={() => setStep(1)} nextOk={canNext[0]} />
           </Panel>
         )}
 
-        {/* STEP 3: CAST */}
-        {step === 3 && (
+        {/* STEP 1: CAST */}
+        {step === 1 && (
           <Panel title="Add your cast" sub="Each guest becomes a character card. Add their name and a clear face photo — it becomes the card's portrait.">
             <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", marginBottom: 16, borderRadius: 10, border: "1px solid #33333e", background: "rgba(243,207,91,0.05)", color: "#c8c8d4", fontSize: 13, lineHeight: 1.4 }}>
               <span style={{ fontSize: 18 }}>📸</span>
@@ -1326,12 +1281,12 @@ export default function SideQuest() {
                 <span>I confirm I have permission from everyone whose photo I uploaded to use their likeness to generate character art.</span>
               </label>
             )}
-            <NavRow onBack={() => setStep(2)} onNext={() => setStep(4)} nextOk={canNext[3]} nextLabel="Next: build deck →" />
+            <NavRow onBack={() => setStep(0)} onNext={() => setStep(2)} nextOk={canNext[1]} nextLabel="Next: build deck →" />
           </Panel>
         )}
 
-        {/* STEP 4: DECK BUILDER */}
-        {step === 4 && (
+        {/* STEP 2: DECK BUILDER */}
+        {step === 2 && (
           <Panel title="Build your deck" sub="Beyond the heroes, add categories of cards — NPCs, artifacts, spells, whatever fits. Each starts from templates; hit ‘Suggest from lore’ to tailor them to your quest. All cards stay fully editable.">
             <DeckBuilder
               theme={themeObj}
@@ -1346,12 +1301,12 @@ export default function SideQuest() {
               onRemoveCard={removeSpecCard}
               onSuggest={suggestForCategory}
             />
-            <NavRow onBack={() => setStep(3)} onNext={() => runGeneration()} nextOk nextLabel="✦ Generate deck" />
+            <NavRow onBack={() => setStep(1)} onNext={() => runGeneration()} nextOk nextLabel="✦ Generate deck" />
           </Panel>
         )}
 
-        {/* STEP 5: REVEAL */}
-        {step === 5 && (
+        {/* STEP 3: REVEAL */}
+        {step === 3 && (
           <div>
             {genState === "lore" && <BigLoader label="Claude is writing your deck's lore…" />}
             {(genState === "art" || genState === "done") && (
@@ -1366,12 +1321,12 @@ export default function SideQuest() {
                   <SectionLabel>{genState === "art" ? "Dealing your deck…" : "Your deck — tap to flip · double-click to enlarge & edit"}</SectionLabel>
                   {genState === "done" && (
                     <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                      <GhostButton onClick={() => setStep(3)}>← Edit cast</GhostButton>
-                      <GhostButton onClick={() => setStep(4)}>⚑ Edit deck</GhostButton>
+                      <GhostButton onClick={() => setStep(1)}>← Edit cast</GhostButton>
+                      <GhostButton onClick={() => setStep(2)}>⚑ Edit deck</GhostButton>
                       <GhostButton onClick={saveCurrentDeck}>
                         {saveState === "saving" ? "Saving…" : saveState === "saved" ? "✓ Saved" : "⤓ Save deck"}
                       </GhostButton>
-                      <PrimaryButton onClick={() => setStep(6)}>Order deck →</PrimaryButton>
+                      <PrimaryButton onClick={() => setStep(4)}>Order deck →</PrimaryButton>
                     </div>
                   )}
                 </div>
@@ -1395,8 +1350,8 @@ export default function SideQuest() {
           </div>
         )}
 
-        {/* STEP 6: ORDER */}
-        {step === 6 && (
+        {/* STEP 4: ORDER */}
+        {step === 4 && (
           <Panel title="Ship the real thing" sub="Premium card stock, full-bleed art, custom tuck box.">
             <div style={{ display: "flex", gap: 30, flexWrap: "wrap", alignItems: "center", justifyContent: "center" }}>
               <div style={{ display: "flex" }}>
@@ -1430,7 +1385,7 @@ export default function SideQuest() {
                 ) : (
                   <PrimaryButton onClick={() => setOrderPlaced(true)} style={{ width: "100%" }}>Order physical deck</PrimaryButton>
                 )}
-                <GhostButton onClick={() => { setOrderPlaced(false); setStep(5); }} style={{ width: "100%", marginTop: 10 }}>← Back to deck</GhostButton>
+                <GhostButton onClick={() => { setOrderPlaced(false); setStep(3); }} style={{ width: "100%", marginTop: 10 }}>← Back to deck</GhostButton>
               </div>
             </div>
           </Panel>
