@@ -172,6 +172,15 @@ const EVENT_LORES = [
 // Quest step arrives with a coherent suggestion rather than a blank slate.
 const THEME_TO_SETTING = { starwars: "space-opera", lotr: "high-fantasy", onepiece: "pirate", cyber: "cyberpunk", noir: "noir" };
 const EVENT_TO_OCCASION = { bachelor: "bachelor", trip: "trip", party: "house-party", drinking: "drinking-game", wedding: "wedding-reception", corporate: "office-party" };
+// Each Setting maps to the closest visual theme so choosing a world also styles
+// the cards (fonts/colors/art). A starting point — the World step can override.
+const SETTING_TO_THEME = {
+  "high-fantasy": "lotr", "cyberpunk": "cyber", "ancient-greece": "lotr", "pirate": "onepiece",
+  "wild-west": "onepiece", "noir": "noir", "space-opera": "starwars", "post-apocalyptic": "noir",
+  "norse": "lotr", "egypt": "potter", "feudal-japan": "lotr", "victorian-gothic": "potter",
+  "superhero": "cyber", "secret-agent": "noir", "lost-expedition": "onepiece", "fairy-tale": "potter",
+  "mob-1930s": "noir", "time-travelers": "starwars",
+};
 
 function composeLore(settingId, occasionId) {
   const s = SETTING_LORES.find((x) => x.id === settingId);
@@ -830,7 +839,7 @@ function LoreLibrary({ settingId, occasionId, onPickSetting, onPickOccasion }) {
   );
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16, marginBottom: 18, padding: 16, borderRadius: 12, border: "1px solid #2a2a33", background: "rgba(255,255,255,0.02)" }}>
-      <div style={{ fontSize: 13, color: "#c8c8d4", lineHeight: 1.4 }}>✨ Pick a <strong>setting</strong> and an <strong>occasion</strong> to auto-write a starting prompt — then personalize it below. Tap again to deselect.</div>
+      <div style={{ fontSize: 13, color: "#c8c8d4", lineHeight: 1.4 }}>✨ Pick a <strong>setting</strong> (also styles the cards) and an <strong>occasion</strong> to auto-write a starting prompt — then personalize it below. Tap again to deselect.</div>
       <Group label="Setting — the world" items={SETTING_LORES} activeId={settingId} onPick={onPickSetting} />
       <Group label="Occasion — the vibe" items={EVENT_LORES} activeId={occasionId} onPick={onPickOccasion} />
     </div>
@@ -992,6 +1001,8 @@ export default function SideQuest() {
     const next = id === loreSetting ? null : id;
     setLoreSetting(next);
     setQuestPrompt(composeLore(next, loreOccasion));
+    // Keep the card look aligned with the chosen world (overridable in the World step).
+    if (next && SETTING_TO_THEME[next]) setTheme(SETTING_TO_THEME[next]);
   }
   function pickOccasion(id) {
     const next = id === loreOccasion ? null : id;
