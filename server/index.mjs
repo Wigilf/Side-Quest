@@ -257,19 +257,27 @@ async function generatePortrait({ photoDataUrl, themeStyle, lore, refineNote }) 
 }
 
 // Text-to-image for NON-character cards (artifacts, spells, NPCs, locations…) —
-// no face reference. The type line tells the model what to depict.
+// no face reference. The type line decides what kind of subject to paint so an
+// artifact reads as the item itself, not a person holding it.
 async function generateObjectArt({ themeStyle, lore, refineNote, category }) {
   const title = lore?.title || "a mysterious relic";
   const typeLine = lore?.typeLine || category || "Artifact";
+  const hay = `${typeLine} ${category || ""}`.toLowerCase();
+  let subject;
+  if (/artifact|equipment|relic|item|weapon|treasure/.test(hay)) {
+    subject = `Center the composition on the ITEM/ARTIFACT itself as the hero subject, displayed prominently and iconically. Do NOT feature a person — no human figure holding or using it (a distant, tiny background figure is acceptable at most).`;
+  } else if (/land|location|place|site|realm|region|domain/.test(hay)) {
+    subject = `Depict the PLACE/LANDSCAPE itself as an establishing environment shot. Do NOT feature a dominant human figure; the location is the subject.`;
+  } else if (/sorcery|instant|spell|enchant|ritual|hex|charm|incantation/.test(hay)) {
+    subject = `Depict the MAGICAL EFFECT/PHENOMENON itself in action — energy, force, transformation — as the subject. Avoid a dominant human figure.`;
+  } else {
+    subject = `Depict an ENTIRELY ORIGINAL character/creature (invent it — do NOT depict any real, specific, or recognizable person), head-and-shoulders or heroic framing.`;
+  }
   const prompt =
-    `Paint an ORIGINAL trading-card illustration for "${title}" — a ${typeLine}. ` +
-    `Depict the card's subject exactly as its title and type imply: a creature or character, ` +
-    `an artifact or item, a spell effect, or a place/landscape, whichever fits. If it depicts ` +
-    `a person or creature, invent an entirely original character — do NOT depict any real, ` +
-    `specific, or recognizable person. Fully painted/illustrated — NOT a photograph. ` +
-    `Style: ${styleBrief(themeStyle)}. Iconic centered composition, dramatic lighting, rich ` +
-    `thematic background. No text, no card border, no watermark. ` +
-    `${refineNote ? "Art direction: " + refineNote : ""}`.trim();
+    `Paint an ORIGINAL trading-card illustration for "${title}" — a ${typeLine}. ${subject} ` +
+    `Fully painted/illustrated — NOT a photograph. Style: ${styleBrief(themeStyle)}. Iconic ` +
+    `centered composition, dramatic lighting, rich thematic background. No text, no card ` +
+    `border, no watermark. ${refineNote ? "Art direction: " + refineNote : ""}`.trim();
 
   return callGeminiImage([{ text: prompt }]);
 }
