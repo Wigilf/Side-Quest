@@ -826,8 +826,10 @@ function loreChip(active) {
     fontWeight: active ? 700 : 500, transition: "all .15s",
   };
 }
-function LoreLibrary({ settingId, occasionId, onPickSetting, onPickOccasion }) {
-  const Group = ({ label, items, activeId, onPick }) => (
+// Hoisted out of LoreLibrary so it isn't a fresh component type each render
+// (which would remount the chip lists and reset their scroll on every keystroke).
+function LoreGroup({ label, items, activeId, onPick }) {
+  return (
     <div>
       <div style={{ fontFamily: UI_FONT, fontSize: 12, letterSpacing: 0.4, textTransform: "uppercase", color: "#8a8a98", marginBottom: 8 }}>{label}</div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, maxHeight: 118, overflowY: "auto", padding: "1px 2px 4px" }}>
@@ -837,6 +839,9 @@ function LoreLibrary({ settingId, occasionId, onPickSetting, onPickOccasion }) {
       </div>
     </div>
   );
+}
+function LoreLibrary({ settingId, occasionId, onPickSetting, onPickOccasion }) {
+  const Group = LoreGroup;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16, marginBottom: 18, padding: 16, borderRadius: 12, border: "1px solid #2a2a33", background: "rgba(255,255,255,0.02)" }}>
       <div style={{ fontSize: 13, color: "#c8c8d4", lineHeight: 1.4 }}>✨ Pick a <strong>setting</strong> (also styles the cards) and an <strong>occasion</strong> to auto-write a starting prompt — then personalize it below. Tap again to deselect.</div>
@@ -1372,7 +1377,7 @@ export default function SideQuest() {
                       photo={(participants.find((p) => p.id === c.pid) || {}).photo || null}
                       flipped={!!flipped[c.uid]} onFlip={() => setFlipped((s) => ({ ...s, [c.uid]: !s[c.uid] }))}
                       onExpand={() => setEditingUid(c.uid)}
-                      compact busy={busyCard === c.uid} onRegenLore={AI_ENABLED ? () => regenLore(c.uid) : undefined} onRegenArt={(note) => regenArt(c.uid, note)} />
+                      compact busy={busyCard === c.uid} onRegenLore={AI_ENABLED && !c.category ? () => regenLore(c.uid) : undefined} onRegenArt={(note) => regenArt(c.uid, note)} />
                   ))}
                 </div>
               </>
@@ -1445,7 +1450,7 @@ export default function SideQuest() {
           onClose={() => setEditingUid(null)}
           onChange={(patch) => updateCard(editingUid, patch)}
           onRegenArt={(note) => regenArt(editingUid, note)}
-          onRegenLore={AI_ENABLED ? () => regenLore(editingUid) : undefined}
+          onRegenLore={AI_ENABLED && !(cards.find((c) => c.uid === editingUid) || {}).category ? () => regenLore(editingUid) : undefined}
         />
       )}
     </div>
