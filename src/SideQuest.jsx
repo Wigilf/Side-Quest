@@ -186,6 +186,32 @@ const SETTING_TO_THEME = {
   "mob-1930s": "noir", "time-travelers": "starwars",
 };
 
+// Guided lore builder — structured guardrails the user fills in and we merge
+// into one prompt. `chips` are optional quick-fill suggestions.
+const GUARDRAIL_TYPES = [
+  { id: "setting", label: "Setting", hint: "Indoors, outdoors, or a mix? Where does it happen?", chips: ["Indoors", "Outdoors", "A mix of both"] },
+  { id: "location", label: "Location", hint: "The city, venue, or specific place" },
+  { id: "duration", label: "Duration", hint: "How long should the quest run?", chips: ["An hour", "One evening", "All day", "A whole weekend"] },
+  { id: "objectives", label: "Objectives", hint: "What must the group accomplish to win?" },
+  { id: "enemies", label: "Enemies / obstacles", hint: "Who or what stands in their way?" },
+  { id: "tone", label: "Tone", hint: "The overall vibe", chips: ["Funny", "Epic", "Wholesome", "Chaotic", "Romantic", "Spooky"] },
+  { id: "rules", label: "Rules / constraints", hint: "Any special rules or limits to respect" },
+  { id: "reward", label: "Reward / win", hint: "What do they get for finishing?" },
+  { id: "custom", label: "Anything else", hint: "Any other detail Side Quest should weave in" },
+];
+const guardrailLabel = (id) => (GUARDRAIL_TYPES.find((g) => g.id === id) || { label: "Detail" }).label;
+
+// Merge the free-text quest + any guardrails into one prompt for lore generation.
+function mergeQuest(freeText, guardrails) {
+  const parts = [];
+  if ((freeText || "").trim()) parts.push(freeText.trim());
+  (guardrails || []).forEach((g) => {
+    const d = (g.details || "").trim();
+    if (d) parts.push(`${guardrailLabel(g.type)}: ${d}`);
+  });
+  return parts.join("\n");
+}
+
 function composeLore(settingId, occasionId) {
   const s = SETTING_LORES.find((x) => x.id === settingId);
   const o = EVENT_LORES.find((x) => x.id === occasionId);
@@ -535,7 +561,7 @@ function GhostButton({ children, onClick, style }) {
 // THEME-ADAPTIVE FLIP CARD
 // ---------------------------------------------------------------------------
 
-function GameCard({ card, theme, art, photo, loadingArt, flipped, onFlip, onExpand, onRegenLore, onRegenArt, busy, compact, w }) {
+function GameCard({ card, theme, art, photo, loadingArt, flipped, onFlip, onExpand, onRegenLore, onRegenArt, busy, compact, w, cardBack }) {
   const fr = CARD_FRAMES.find((f) => f.key === card.frame) || CARD_FRAMES[0];
   const t = theme;
   // Show the raw uploaded face only when the art is the procedural backdrop
@@ -567,15 +593,25 @@ function GameCard({ card, theme, art, photo, loadingArt, flipped, onFlip, onExpa
         {/* ---- CARD BACK ---- */}
         <div style={{
           position: "absolute", inset: 0, backfaceVisibility: "hidden",
-          transform: "rotateY(180deg)", borderRadius: corner,
+          transform: "rotateY(180deg)", borderRadius: corner, overflow: "hidden",
           background: `linear-gradient(160deg, ${t.bg[1]}, ${t.bg[0]})`,
           border: `2px solid ${t.accent}`, display: "flex", alignItems: "center",
           justifyContent: "center", flexDirection: "column", gap: 10,
           boxShadow: `0 18px 40px rgba(0,0,0,0.5)`,
         }}>
-          <div style={{ fontSize: 40 * scale, color: t.accent, opacity: 0.9 }}>{t.ornament}</div>
-          <div style={{ fontFamily: t.displayFont, color: t.accent, letterSpacing: 4, fontSize: 13 * scale, textTransform: "uppercase" }}>Side Quest</div>
-          <div style={{ fontFamily: UI_FONT, color: t.ink, opacity: 0.5, fontSize: 10 * scale }}>tap to reveal</div>
+          {cardBack && cardBack.type === "image" && cardBack.image ? (
+            <>
+              <img src={cardBack.image} alt="" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }} />
+              <div style={{ position: "absolute", inset: 0, background: "linear-gradient(180deg, transparent 55%, rgba(0,0,0,0.65) 100%)" }} />
+              <div style={{ position: "absolute", bottom: 10 * scale, fontFamily: t.displayFont, color: "#fff", letterSpacing: 3, fontSize: 11 * scale, textTransform: "uppercase", textShadow: "0 1px 4px rgba(0,0,0,0.8)" }}>Side Quest</div>
+            </>
+          ) : (
+            <>
+              <div style={{ fontSize: 40 * scale, color: t.accent, opacity: 0.9 }}>{t.ornament}</div>
+              <div style={{ fontFamily: t.displayFont, color: t.accent, letterSpacing: 4, fontSize: 13 * scale, textTransform: "uppercase" }}>Side Quest</div>
+              <div style={{ fontFamily: UI_FONT, color: t.ink, opacity: 0.5, fontSize: 10 * scale }}>tap to reveal</div>
+            </>
+          )}
         </div>
 
         {/* ---- CARD FRONT ---- */}
@@ -892,6 +928,70 @@ function CardStylePicker({ themeId, onPick }) {
 }
 
 // ---------------------------------------------------------------------------
+// GUIDED LORE BUILDER (guardrails) + CARD BACK
+// ---------------------------------------------------------------------------
+function GuardrailBuilder({ guardrails, onAdd, onUpdate, onRemove }) {
+  const inp = { width: "100%", boxSizing: "border-box", fontFamily: UI_FONT, fontSize: 13, padding: "8px 10px", borderRadius: 8, color: "#f0f0f6", background: "rgba(0,0,0,0.4)", border: "1px solid #3a3a45", outline: "none" };
+  return (
+    <div style={{ marginTop: 18, padding: 16, borderRadius: 12, border: "1px dashed #44444f" }}>
+      <div style={{ fontFamily: UI_FONT, fontSize: 13, color: "#c8c8d4", marginBottom: 4 }}>🎯 <strong>Guided details</strong> <span style={{ color: "#8a8a98" }}>(optional)</span></div>
+      <div style={{ fontSize: 12, color: "#8a8a98", marginBottom: 14 }}>Pin down specifics — setting, duration, objectives, enemies… Add as many as you like; they're all folded into the lore.</div>
+      {guardrails.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 12 }}>
+          {guardrails.map((g) => {
+            const def = GUARDRAIL_TYPES.find((x) => x.id === g.type) || GUARDRAIL_TYPES[0];
+            return (
+              <div key={g.id} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                <select value={g.type} onChange={(e) => onUpdate(g.id, { type: e.target.value })} style={{ ...inp, width: 170, flexShrink: 0, cursor: "pointer" }}>
+                  {GUARDRAIL_TYPES.map((t) => <option key={t.id} value={t.id} style={{ background: "#15121d" }}>{t.label}</option>)}
+                </select>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <textarea value={g.details} onChange={(e) => onUpdate(g.id, { details: e.target.value })} placeholder={def.hint} rows={2} style={{ ...inp, resize: "vertical", lineHeight: 1.35 }} />
+                  {def.chips && (
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6 }}>
+                      {def.chips.map((c) => (
+                        <button key={c} onClick={() => onUpdate(g.id, { details: g.details ? g.details + (/[.,;]\s*$/.test(g.details) ? " " : ", ") + c : c })} style={{ fontFamily: UI_FONT, fontSize: 12, padding: "4px 10px", borderRadius: 999, cursor: "pointer", color: "#cfcfda", background: "rgba(255,255,255,0.05)", border: "1px solid #3a3a45" }}>+ {c}</button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <button onClick={() => onRemove(g.id)} title="Remove" style={{ background: "none", border: "none", color: "#8a8a98", cursor: "pointer", fontSize: 16, lineHeight: 1, marginTop: 8 }}>✕</button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <button onClick={() => onAdd("setting")} style={{ fontFamily: UI_FONT, fontSize: 13, fontWeight: 500, padding: "8px 14px", borderRadius: 8, cursor: "pointer", color: "#e8e8f0", background: "rgba(255,255,255,0.05)", border: "1px solid #3a3a45" }}>＋ Add a detail</button>
+    </div>
+  );
+}
+
+function CardBackPanel({ cardBack, onSetTheme, onImage, onClose, t }) {
+  const isImg = cardBack && cardBack.type === "image" && cardBack.image;
+  const opt = (active) => ({ flex: 1, textAlign: "center", padding: "14px 10px", borderRadius: 10, cursor: "pointer", border: `1.5px solid ${active ? t.accent : "#3a3a45"}`, background: active ? `${t.accent}18` : "rgba(255,255,255,0.03)", fontFamily: UI_FONT, fontSize: 13, color: active ? t.accent : "#dcdce4" });
+  return (
+    <div style={{ marginTop: 16, padding: 18, borderRadius: 14, border: `1px solid ${t.accent}44`, background: "rgba(255,255,255,0.03)" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+        <div style={{ fontFamily: t.displayFont, fontWeight: 700, fontSize: 16, color: "#f4f4fa" }}>Card back</div>
+        <button onClick={onClose} style={{ background: "none", border: "none", color: "#c8c8d4", fontSize: 20, cursor: "pointer", lineHeight: 1 }}>×</button>
+      </div>
+      <div style={{ display: "flex", gap: 10, alignItems: "stretch" }}>
+        <div onClick={onSetTheme} style={opt(!isImg)}>
+          <div style={{ fontSize: 26, color: t.accent, marginBottom: 4 }}>{t.ornament}</div>
+          Themed design
+        </div>
+        <label style={{ ...opt(isImg), display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 6, position: "relative", overflow: "hidden" }}>
+          {isImg ? <img src={cardBack.image} alt="" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", opacity: 0.85 }} /> : <div style={{ fontSize: 22 }}>🖼️</div>}
+          <span style={{ position: "relative", zIndex: 1, textShadow: isImg ? "0 1px 3px rgba(0,0,0,0.8)" : "none", color: isImg ? "#fff" : undefined }}>{isImg ? "Change image" : "Upload image"}</span>
+          <input type="file" accept="image/*" onChange={(e) => e.target.files[0] && onImage(e.target.files[0])} style={{ display: "none" }} />
+        </label>
+      </div>
+      <div style={{ fontSize: 12, color: "#7a7a88", marginTop: 10 }}>This design prints on the back of every card in the deck.</div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // SHARE + COLLABORATION UI
 // ---------------------------------------------------------------------------
 function SharePanel({ shareLink, collabLink, onEnableCollab, onCopy, onClose, t }) {
@@ -955,6 +1055,9 @@ export default function SideQuest() {
   const [participants, setParticipants] = useState([]);
 
   const [questCard, setQuestCard] = useState(null);
+  const [guardrails, setGuardrails] = useState([]);        // [{ id, type, details }] — guided lore
+  const [cardBack, setCardBack] = useState({ type: "theme" }); // { type:"theme" } | { type:"image", image }
+  const [cardBackOpen, setCardBackOpen] = useState(false);
   const [loreSetting, setLoreSetting] = useState(null);   // selected Setting lore id
   const [loreOccasion, setLoreOccasion] = useState(null); // selected Occasion lore id
   const [categories, setCategories] = useState([]); // [{ id, name, cards: [specCard] }]
@@ -1025,7 +1128,7 @@ export default function SideQuest() {
     setSaveState("saving");
     const id = currentDeckId || newId();
     const name = questPrompt.slice(0, 42) || eventType || "Untitled deck";
-    const deck = { id, name, user, eventType, theme, questPrompt, participants, categories, questCard, cards, arts, updatedAt: Date.now() };
+    const deck = { id, name, user, eventType, theme, questPrompt, guardrails, cardBack, participants, categories, questCard, cards, arts, updatedAt: Date.now() };
     try {
       const r = await api("POST", "/api/sq/save", { ownerToken: getOwnerToken(), deck });
       setCurrentDeckId(r.id);
@@ -1114,6 +1217,7 @@ export default function SideQuest() {
     setEventType(d.eventType); setTheme(d.theme); setQuestPrompt(d.questPrompt || "");
     setParticipants(d.participants || []); setQuestCard(d.questCard || null);
     setCategories(d.categories || []); setLoreSetting(null); setLoreOccasion(null);
+    setGuardrails(d.guardrails || []); setCardBack(d.cardBack || { type: "theme" });
     const loaded = (d.cards || []).map((c, i) => {
       if (c.uid) return c;
       return { ...c, uid: `${c.realName}-${i}`, pid: c.pid ?? (d.participants && d.participants[i] ? d.participants[i].id : null) };
@@ -1144,7 +1248,7 @@ export default function SideQuest() {
   function newDeck() {
     setCurrentDeckId(null); setUser({ name: "", email: "" }); setEventType(null);
     setTheme(null); setQuestPrompt(""); setParticipants([]); setQuestCard(null); setCategories([]);
-    setLoreSetting(null); setLoreOccasion(null);
+    setLoreSetting(null); setLoreOccasion(null); setGuardrails([]); setCardBack({ type: "theme" }); setCardBackOpen(false);
     setCards([]); setArts({}); setFlipped({}); setGenState("idle"); setOrderPlaced(false); setPhotoConsent(false);
     setCollabToken(null); setCollabMode(false); setShareOpen(false); setCollabNew(0);
     setShowDecks(false); setLanding(false); setStep(0);
@@ -1194,12 +1298,21 @@ export default function SideQuest() {
     setEventType(occ ? occ.name : null);
   }
 
+  // Guided lore builder
+  function addGuardrail(type = "setting") {
+    setGuardrails((g) => [...g, { id: "gr_" + Math.random().toString(36).slice(2, 8), type, details: "" }]);
+  }
+  function updateGuardrail(id, patch) { setGuardrails((g) => g.map((x) => (x.id === id ? { ...x, ...patch } : x))); }
+  function removeGuardrail(id) { setGuardrails((g) => g.filter((x) => x.id !== id)); }
+  const fullQuest = () => mergeQuest(questPrompt, guardrails);
+
   function addParticipant() {
     setParticipants((p) => [...p, { id: Date.now() + Math.random(), name: "", photo: null }]);
   }
   function updateParticipant(id, patch) { setParticipants((p) => p.map((x) => (x.id === id ? { ...x, ...patch } : x))); }
   function removeParticipant(id) { setParticipants((p) => p.filter((x) => x.id !== id)); }
   function onPhoto(id, file) { const rd = new FileReader(); rd.onload = () => updateParticipant(id, { photo: rd.result }); rd.readAsDataURL(file); }
+  function onCardBackImage(file) { const rd = new FileReader(); rd.onload = () => setCardBack({ type: "image", image: rd.result }); rd.readAsDataURL(file); }
 
   function loadDemo() {
     setUser(DEMO.user); setEventType(DEMO.eventType); setTheme(DEMO.theme);
@@ -1209,7 +1322,7 @@ export default function SideQuest() {
   }
 
   async function runGeneration(override) {
-    const src = override || { eventType: eventType || "an event", theme, questPrompt, participants, categories };
+    const src = override || { eventType: eventType || "an event", theme, questPrompt: fullQuest(), participants, categories };
     setError(""); setGenState("lore"); setStep(3); setFlipped({});
     try {
       // --- Lore: live Claude call, with a baked-in fallback for stage safety ---
@@ -1269,7 +1382,7 @@ export default function SideQuest() {
     setArts((curArts) => {
       const id = currentDeckId || newId();
       const name = (src.questPrompt || "").slice(0, 42) || src.eventType || "Untitled deck";
-      const deck = { id, name, user: src.user || user, eventType: src.eventType, theme: src.theme, questPrompt: src.questPrompt, participants: src.participants, categories: src.categories || [], questCard: qCard, cards: ordered, arts: curArts, updatedAt: Date.now() };
+      const deck = { id, name, user: src.user || user, eventType: src.eventType, theme: src.theme, questPrompt, guardrails, cardBack, participants: src.participants, categories: src.categories || [], questCard: qCard, cards: ordered, arts: curArts, updatedAt: Date.now() };
       (async () => {
         try {
           const r = await api("POST", "/api/sq/save", { ownerToken: getOwnerToken(), deck });
@@ -1353,7 +1466,7 @@ export default function SideQuest() {
   }
 
   const canNext = {
-    0: questPrompt.trim().length > 8,
+    0: fullQuest().trim().length > 8,
     1: participants.length > 0 && participants.every((p) => p.name.trim()) &&
        (!participants.some((p) => p.photo) || photoConsent),
   };
@@ -1425,6 +1538,7 @@ export default function SideQuest() {
               placeholder="Write your own, or edit a template. e.g. Dave's bachelor party in Lisbon — complete dares across the city to 'earn back' his freedom before the wedding. He fears seagulls and loves bad karaoke."
               style={{ ...inputStyle, resize: "vertical", lineHeight: 1.5 }} />
             <div style={{ fontSize: 12, color: "#7a7a88", marginTop: 8 }}>Tip: name the guest of honor, the place, and a couple personal details for sharper cards.</div>
+            <GuardrailBuilder guardrails={guardrails} onAdd={addGuardrail} onUpdate={updateGuardrail} onRemove={removeGuardrail} />
             <NavRow onNext={() => setStep(1)} nextOk={canNext[0]} />
           </Panel>
         )}
@@ -1522,6 +1636,7 @@ export default function SideQuest() {
                           <GhostButton onClick={saveCurrentDeck}>
                             {saveState === "saving" ? "Saving…" : saveState === "saved" ? "✓ Saved" : "⤓ Save deck"}
                           </GhostButton>
+                          <GhostButton onClick={() => setCardBackOpen((v) => !v)}>🂠 Card back</GhostButton>
                           <GhostButton onClick={async () => { await ensureSaved(); setShareOpen((v) => !v); }}>⤴ Share</GhostButton>
                           <PrimaryButton onClick={() => setStep(4)}>Order deck →</PrimaryButton>
                         </>
@@ -1529,6 +1644,9 @@ export default function SideQuest() {
                     </div>
                   )}
                 </div>
+                {!collabMode && cardBackOpen && genState === "done" && (
+                  <CardBackPanel cardBack={cardBack} onSetTheme={() => setCardBack({ type: "theme" })} onImage={onCardBackImage} onClose={() => setCardBackOpen(false)} t={themeObj} />
+                )}
                 {!collabMode && shareOpen && genState === "done" && (
                   <SharePanel
                     shareLink={currentDeckId ? shareUrl(currentDeckId) : ""}
@@ -1543,7 +1661,7 @@ export default function SideQuest() {
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(232px, 1fr))", gap: 26, justifyItems: "center", marginTop: 18 }}>
                   {cards.map((c) => (
                     <GameCard key={c.uid} card={c} theme={themeObj} art={arts[c.uid]} loadingArt={loadingArt[c.uid]}
-                      photo={(participants.find((p) => p.id === c.pid) || {}).photo || null}
+                      photo={(participants.find((p) => p.id === c.pid) || {}).photo || null} cardBack={cardBack}
                       flipped={!!flipped[c.uid]} onFlip={() => setFlipped((s) => ({ ...s, [c.uid]: !s[c.uid] }))}
                       onExpand={() => setEditingUid(c.uid)}
                       compact busy={busyCard === c.uid} onRegenLore={AI_ENABLED && !c.category ? () => regenLore(c.uid) : undefined} onRegenArt={(note) => regenArt(c.uid, note)} />
