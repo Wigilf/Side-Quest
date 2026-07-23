@@ -1118,6 +1118,27 @@ export default function SideQuest() {
     }
   }
 
+  // When collaboration is on, pull any cards contributors added that we don't
+  // have locally, so a full-deck save doesn't clobber them. Returns merged
+  // {cards, arts}; also reflects the additions in the UI.
+  async function mergeCollabCards(localCards, localArts) {
+    if (!collabEnabled || !currentDeckId) return { cards: localCards, arts: localArts };
+    try {
+      const d = await api("GET", `/api/sq/deck/${encodeURIComponent(currentDeckId)}`);
+      const serverCards = (d.deck && d.deck.cards) || [];
+      const serverArts = (d.deck && d.deck.arts) || {};
+      const have = new Set(localCards.map((c) => c.uid));
+      const extras = serverCards.filter((c) => !have.has(c.uid));
+      if (!extras.length) return { cards: localCards, arts: localArts };
+      const cardsOut = [...localCards, ...extras];
+      const artsOut = { ...localArts };
+      extras.forEach((c) => { if (serverArts[c.uid]) artsOut[c.uid] = serverArts[c.uid]; });
+      setCards(cardsOut); setArts(artsOut); setCollabNew(0);
+      setFlipped((prev) => { const fl = { ...prev }; extras.forEach((c) => (fl[c.uid] = true)); return fl; });
+      return { cards: cardsOut, arts: artsOut };
+    } catch (e) { return { cards: localCards, arts: localArts }; }
+  }
+
   // Save the current deck to the server (fixes the localStorage-quota bug).
   async function saveCurrentDeck() {
     if (!cards.length) return;
@@ -1125,9 +1146,11 @@ export default function SideQuest() {
     setSaveState("saving");
     const id = currentDeckId || newId();
     const name = questPrompt.slice(0, 42) || eventType || "Untitled deck";
+    // Merge in any contributor cards before overwriting the shared deck.
+    const merged = await mergeCollabCards(cards, arts);
     // Note: `user` is intentionally NOT saved — shared/collab links return the
     // whole payload, so we keep owner PII out of it.
-    const deck = { id, name, eventType, theme, questPrompt, guardrails, cardBack, participants, categories, questCard, cards, arts, updatedAt: Date.now() };
+    const deck = { id, name, eventType, theme, questPrompt, guardrails, cardBack, participants, categories, questCard, cards: merged.cards, arts: merged.arts, updatedAt: Date.now() };
     try {
       const r = await api("POST", "/api/sq/save", { ownerToken: getOwnerToken(), deck });
       setCurrentDeckId(r.id);
