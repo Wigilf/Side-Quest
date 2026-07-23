@@ -684,7 +684,8 @@ const server = http.createServer(async (req, res) => {
   const routeKey = `${req.method} ${p}`;
 
   // Rate-limit money/key-spending + auth endpoints (blunt brute-force/abuse).
-  const rateLimitedPath = PAID.has(p) || p === "/api/checkout" || p === "/api/auth/login" || p === "/api/auth/signup";
+  const sqWrite = p.startsWith("/api/sq/") && (req.method === "POST" || req.method === "DELETE");
+  const rateLimitedPath = PAID.has(p) || sqWrite || p === "/api/checkout" || p === "/api/auth/login" || p === "/api/auth/signup";
   if (rateLimitedPath) {
     if (PAID.has(p) && API_TOKEN) {
       const auth = req.headers.authorization || "";

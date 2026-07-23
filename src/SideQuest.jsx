@@ -172,12 +172,8 @@ const EVENT_LORES = [
   { id: "family-reunion", icon: "👨‍👩‍👧‍👦", name: "Family Reunion", text: "The Elders have gathered, the Cousins have assembled, and the deck is the family's secret game master. Quests bridge generations: extract an embarrassing story about a parent from a grandparent, learn a family recipe step, get three generations in one photo doing the same pose, settle (or reignite) a legendary family debate. Tone: warm, nostalgic, gently chaotic." },
 ];
 
-// Pre-seed the lore library from the Event/World the user already picked so the
-// Quest step arrives with a coherent suggestion rather than a blank slate.
-const THEME_TO_SETTING = { starwars: "space-opera", lotr: "high-fantasy", onepiece: "pirate", cyber: "cyberpunk", noir: "noir" };
-const EVENT_TO_OCCASION = { bachelor: "bachelor", trip: "trip", party: "house-party", drinking: "drinking-game", wedding: "wedding-reception", corporate: "office-party" };
 // Each Setting maps to the closest visual theme so choosing a world also styles
-// the cards (fonts/colors/art). A starting point — the World step can override.
+// the cards (fonts/colors/art). Overridable via the Card style picker.
 const SETTING_TO_THEME = {
   "high-fantasy": "lotr", "cyberpunk": "cyber", "ancient-greece": "lotr", "pirate": "onepiece",
   "wild-west": "onepiece", "noir": "noir", "space-opera": "starwars", "post-apocalyptic": "noir",
@@ -1015,7 +1011,7 @@ function SharePanel({ shareLink, collabLink, onEnableCollab, onCopy, onClose, t 
         <div style={{ fontFamily: t.displayFont, fontWeight: 700, fontSize: 16, color: "#f4f4fa" }}>Share this deck</div>
         <button onClick={onClose} style={{ background: "none", border: "none", color: "#c8c8d4", fontSize: 20, cursor: "pointer", lineHeight: 1 }}>×</button>
       </div>
-      {shareLink ? row("View / copy link", shareLink, "share", "Anyone with this link can view your deck and make their own copy.") : <div style={{ fontSize: 13, color: "#9a9aa8" }}>Save the deck first to get a link.</div>}
+      {shareLink ? row("View / copy link", shareLink, "share", "Anyone with this link can view your deck — including any uploaded photos — and make their own copy.") : <div style={{ fontSize: 13, color: "#9a9aa8" }}>Save the deck first to get a link.</div>}
       {collabLink ? (
         row("Collaborate link", collabLink, "collab", "Send this to friends — they can add and edit cards from their own phones, no sign-up.")
       ) : (
@@ -1080,6 +1076,7 @@ export default function SideQuest() {
   const [savedDecks, setSavedDecks] = useState([]); // [{id,name,theme,eventType,count,updatedAt,collabToken,collabEnabled}]
   const [currentDeckId, setCurrentDeckId] = useState(null);
   const [collabToken, setCollabToken] = useState(null);   // this deck's collab link token
+  const [collabEnabled, setCollabEnabled] = useState(false); // owner turned collaboration on
   const [collabMode, setCollabMode] = useState(false);    // opened via a collab link (I'm a contributor)
   const [collabName, setCollabName] = useState("");       // contributor display name
   const [shareOpen, setShareOpen] = useState(false);      // share panel open on the reveal
@@ -1128,7 +1125,9 @@ export default function SideQuest() {
     setSaveState("saving");
     const id = currentDeckId || newId();
     const name = questPrompt.slice(0, 42) || eventType || "Untitled deck";
-    const deck = { id, name, user, eventType, theme, questPrompt, guardrails, cardBack, participants, categories, questCard, cards, arts, updatedAt: Date.now() };
+    // Note: `user` is intentionally NOT saved — shared/collab links return the
+    // whole payload, so we keep owner PII out of it.
+    const deck = { id, name, eventType, theme, questPrompt, guardrails, cardBack, participants, categories, questCard, cards, arts, updatedAt: Date.now() };
     try {
       const r = await api("POST", "/api/sq/save", { ownerToken: getOwnerToken(), deck });
       setCurrentDeckId(r.id);
@@ -1159,7 +1158,7 @@ export default function SideQuest() {
     if (!s) return null;
     try {
       const r = await api("POST", `/api/sq/deck/${encodeURIComponent(s.id)}/collab`, { ownerToken: getOwnerToken() });
-      setCollabToken(r.collabToken);
+      setCollabToken(r.collabToken); setCollabEnabled(true);
       return r.collabToken;
     } catch (e) { setError("Couldn't enable collaboration: " + e.message); return null; }
   }
@@ -1200,7 +1199,7 @@ export default function SideQuest() {
 
   // Poll for others' changes while viewing a collab-enabled deck.
   useEffect(() => {
-    if (!API_BASE || !collabToken || genState !== "done") return;
+    if (!API_BASE || !collabToken || genState !== "done" || (!collabMode && !collabEnabled)) return;
     const iv = setInterval(async () => {
       try {
         const r = await api("GET", `/api/sq/collab/${encodeURIComponent(collabToken)}/poll?since=0`);
@@ -1209,7 +1208,7 @@ export default function SideQuest() {
     }, 5000);
     return () => clearInterval(iv);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [collabToken, genState, cards.length]);
+  }, [collabToken, genState, cards.length, collabMode, collabEnabled]);
 
   // Load a deck payload into state (shared helper for open / share / collab).
   function loadDeckPayload(d, { collab = false } = {}) {
@@ -1235,6 +1234,7 @@ export default function SideQuest() {
       // fetch this deck's collab token from my list (if I own it)
       const mine = (savedDecks || []).find((x) => x.id === id);
       setCollabToken(mine?.collabToken || null);
+      setCollabEnabled(!!mine?.collabEnabled);
       setCollabMode(false);
     } catch (e) { setError("Couldn't open that deck."); }
   }
@@ -1250,7 +1250,7 @@ export default function SideQuest() {
     setTheme(null); setQuestPrompt(""); setParticipants([]); setQuestCard(null); setCategories([]);
     setLoreSetting(null); setLoreOccasion(null); setGuardrails([]); setCardBack({ type: "theme" }); setCardBackOpen(false);
     setCards([]); setArts({}); setFlipped({}); setGenState("idle"); setOrderPlaced(false); setPhotoConsent(false);
-    setCollabToken(null); setCollabMode(false); setShareOpen(false); setCollabNew(0);
+    setCollabToken(null); setCollabEnabled(false); setCollabMode(false); setShareOpen(false); setCollabNew(0);
     setShowDecks(false); setLanding(false); setStep(0);
   }
 
@@ -1266,7 +1266,7 @@ export default function SideQuest() {
         if (collab) {
           const d = await api("GET", `/api/sq/collab/${encodeURIComponent(collab)}`);
           loadDeckPayload(d.deck || {});
-          setCurrentDeckId(d.id); setCollabToken(collab); setCollabMode(true);
+          setCurrentDeckId(d.id); setCollabToken(collab); setCollabEnabled(true); setCollabMode(true);
           const saved = (() => { try { return localStorage.getItem("sq_name") || ""; } catch { return ""; } })();
           setCollabName(saved);
         } else {
@@ -1382,7 +1382,7 @@ export default function SideQuest() {
     setArts((curArts) => {
       const id = currentDeckId || newId();
       const name = (src.questPrompt || "").slice(0, 42) || src.eventType || "Untitled deck";
-      const deck = { id, name, user: src.user || user, eventType: src.eventType, theme: src.theme, questPrompt, guardrails, cardBack, participants: src.participants, categories: src.categories || [], questCard: qCard, cards: ordered, arts: curArts, updatedAt: Date.now() };
+      const deck = { id, name, eventType: src.eventType, theme: src.theme, questPrompt, guardrails, cardBack, participants: src.participants, categories: src.categories || [], questCard: qCard, cards: ordered, arts: curArts, updatedAt: Date.now() };
       (async () => {
         try {
           const r = await api("POST", "/api/sq/save", { ownerToken: getOwnerToken(), deck });
@@ -1832,21 +1832,6 @@ function Panel({ title, sub, children }) {
       {sub && <p style={{ color: "#9a9aa8", fontSize: 14, margin: "0 0 22px" }}>{sub}</p>}
       {children}
     </div>
-  );
-}
-
-// auto-fit + minmax so the wizard grids collapse to fewer columns on narrow
-// screens instead of crushing fixed columns. `min` is the smallest a card may
-// shrink to before the grid drops a column.
-function grid(min) { return { display: "grid", gridTemplateColumns: `repeat(auto-fit, minmax(${min}px, 1fr))`, gap: 14 }; }
-
-function SelectCard({ active, onClick, icon, title, hint }) {
-  return (
-    <button onClick={onClick} className="ql-fade" style={{ textAlign: "left", cursor: "pointer", borderRadius: 14, padding: 18, border: `1.5px solid ${active ? "#f3cf5b" : "#33333e"}`, background: active ? "rgba(243,207,91,0.08)" : "rgba(255,255,255,0.02)", transition: "all .2s" }}>
-      <div style={{ fontSize: 26, color: active ? "#f3cf5b" : "#c8c8d4", marginBottom: 8 }}>{icon}</div>
-      <div style={{ fontFamily: DISPLAY_FONT, fontSize: 17, fontWeight: 600 }}>{title}</div>
-      <div style={{ color: "#9a9aa8", fontSize: 13, marginTop: 3 }}>{hint}</div>
-    </button>
   );
 }
 
