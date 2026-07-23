@@ -325,14 +325,12 @@ const API_BASE = (import.meta.env && import.meta.env.VITE_API_BASE) || "";
 const API_TOKEN = (import.meta.env && import.meta.env.VITE_API_TOKEN) || "";
 const AI_ENABLED = !!API_BASE;
 
-async function postJSON(pathname, body) {
+async function api(method, pathname, body) {
   const headers = { "Content-Type": "application/json" };
   if (API_TOKEN) headers["Authorization"] = `Bearer ${API_TOKEN}`;
-  const res = await fetch(`${API_BASE}${pathname}`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-  });
+  const opts = { method, headers };
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  const res = await fetch(`${API_BASE}${pathname}`, opts);
   if (!res.ok) {
     let msg = `${pathname} ${res.status}`;
     try { const d = await res.json(); if (d.error) msg = d.error; } catch (e) { /* ignore */ }
@@ -340,6 +338,18 @@ async function postJSON(pathname, body) {
   }
   return res.json();
 }
+const postJSON = (pathname, body) => api("POST", pathname, body);
+
+// Anonymous per-device owner token — identifies "my decks" without a login.
+// Small string in localStorage (no quota issue); an account can claim it later.
+function getOwnerToken() {
+  try {
+    let t = localStorage.getItem("sq_owner");
+    if (!t) { t = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : "own_" + Math.random().toString(36).slice(2) + Date.now(); localStorage.setItem("sq_owner", t); }
+    return t;
+  } catch { return "own_ephemeral"; }
+}
+const newId = () => (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : "d_" + Math.random().toString(36).slice(2) + Date.now();
 
 async function generateDeckLore({ eventType, theme, questPrompt, participants }) {
   if (!API_BASE) throw new Error("no backend configured"); // -> themed fallback deck
@@ -882,6 +892,54 @@ function CardStylePicker({ themeId, onPick }) {
 }
 
 // ---------------------------------------------------------------------------
+// SHARE + COLLABORATION UI
+// ---------------------------------------------------------------------------
+function SharePanel({ shareLink, collabLink, onEnableCollab, onCopy, onClose, t }) {
+  const [copied, setCopied] = useState("");
+  const [enabling, setEnabling] = useState(false);
+  const copy = (link, which) => { onCopy(link); setCopied(which); setTimeout(() => setCopied(""), 1500); };
+  const enable = async () => { setEnabling(true); await onEnableCollab(); setEnabling(false); };
+  const row = (label, link, which, hint) => (
+    <div style={{ marginBottom: 14 }}>
+      <div style={{ fontFamily: UI_FONT, fontSize: 12, letterSpacing: 0.4, textTransform: "uppercase", color: "#9a9aa8", marginBottom: 6 }}>{label}</div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <input readOnly value={link} onFocus={(e) => e.target.select()} style={{ flex: 1, minWidth: 0, fontFamily: UI_FONT, fontSize: 12, padding: "9px 11px", borderRadius: 8, color: "#dcdce4", background: "rgba(0,0,0,0.4)", border: "1px solid #3a3a45", outline: "none" }} />
+        <button onClick={() => copy(link, which)} style={{ fontFamily: UI_FONT, fontSize: 13, fontWeight: 600, padding: "0 14px", borderRadius: 8, cursor: "pointer", color: t.bg[0], background: t.accent, border: "none", whiteSpace: "nowrap" }}>{copied === which ? "Copied!" : "Copy"}</button>
+      </div>
+      {hint && <div style={{ fontSize: 12, color: "#7a7a88", marginTop: 6 }}>{hint}</div>}
+    </div>
+  );
+  return (
+    <div style={{ marginTop: 16, padding: 18, borderRadius: 14, border: `1px solid ${t.accent}44`, background: "rgba(255,255,255,0.03)" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+        <div style={{ fontFamily: t.displayFont, fontWeight: 700, fontSize: 16, color: "#f4f4fa" }}>Share this deck</div>
+        <button onClick={onClose} style={{ background: "none", border: "none", color: "#c8c8d4", fontSize: 20, cursor: "pointer", lineHeight: 1 }}>×</button>
+      </div>
+      {shareLink ? row("View / copy link", shareLink, "share", "Anyone with this link can view your deck and make their own copy.") : <div style={{ fontSize: 13, color: "#9a9aa8" }}>Save the deck first to get a link.</div>}
+      {collabLink ? (
+        row("Collaborate link", collabLink, "collab", "Send this to friends — they can add and edit cards from their own phones, no sign-up.")
+      ) : (
+        <div>
+          <div style={{ fontFamily: UI_FONT, fontSize: 12, letterSpacing: 0.4, textTransform: "uppercase", color: "#9a9aa8", marginBottom: 6 }}>Collaborate</div>
+          <button onClick={enable} disabled={enabling || !shareLink} style={{ fontFamily: UI_FONT, fontSize: 14, fontWeight: 600, padding: "9px 14px", borderRadius: 8, cursor: enabling ? "wait" : "pointer", color: "#e8e8f0", background: "rgba(255,255,255,0.05)", border: `1px solid ${t.accent}66`, opacity: (!shareLink || enabling) ? 0.6 : 1 }}>{enabling ? "Enabling…" : "👥 Let friends add cards"}</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CollabBanner({ name, setName, onAdd, newCount, onRefresh, t }) {
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center", marginBottom: 18, padding: "12px 16px", borderRadius: 12, border: `1px solid ${t.accent}55`, background: `${t.accent}12` }}>
+      <span style={{ fontSize: 18 }}>👥</span>
+      <span style={{ fontFamily: UI_FONT, fontSize: 13, color: "#e8e8f0" }}>You're collaborating — add your own card to the shared deck.</span>
+      <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" style={{ fontFamily: UI_FONT, fontSize: 13, padding: "7px 11px", borderRadius: 8, color: "#f0f0f6", background: "rgba(0,0,0,0.4)", border: "1px solid #3a3a45", width: 140, outline: "none" }} />
+      {newCount > 0 && <button onClick={onRefresh} style={{ fontFamily: UI_FONT, fontSize: 13, padding: "8px 12px", borderRadius: 8, cursor: "pointer", color: "#e8e8f0", background: "rgba(255,255,255,0.06)", border: "1px solid #3a3a45" }}>🔄 {newCount} new — refresh</button>}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // MAIN APP
 // ---------------------------------------------------------------------------
 
@@ -916,20 +974,25 @@ export default function SideQuest() {
   const [checkoutReturn, setCheckoutReturn] = useState(null); // "success" | "cancel"
 
   // ---- persistence ----
-  const [savedDecks, setSavedDecks] = useState([]); // [{id,name,theme,eventType,count,updatedAt}]
+  const [savedDecks, setSavedDecks] = useState([]); // [{id,name,theme,eventType,count,updatedAt,collabToken,collabEnabled}]
   const [currentDeckId, setCurrentDeckId] = useState(null);
+  const [collabToken, setCollabToken] = useState(null);   // this deck's collab link token
+  const [collabMode, setCollabMode] = useState(false);    // opened via a collab link (I'm a contributor)
+  const [collabName, setCollabName] = useState("");       // contributor display name
+  const [shareOpen, setShareOpen] = useState(false);      // share panel open on the reveal
+  const [collabNew, setCollabNew] = useState(0);          // count of new cards from others (poll)
   const [showDecks, setShowDecks] = useState(false);
   const [saveState, setSaveState] = useState("idle"); // idle|saving|saved
 
-  // Load the index of saved decks on first mount.
-  useEffect(() => {
-    (async () => {
-      try {
-        const res = await window.storage.get("deckIndex");
-        if (res && res.value) setSavedDecks(JSON.parse(res.value));
-      } catch (e) { /* no index yet — fine */ }
-    })();
-  }, []);
+  // Load my decks from the server on first mount.
+  async function refreshDecks() {
+    if (!API_BASE) return;
+    try {
+      const d = await api("GET", `/api/sq/list?ownerToken=${encodeURIComponent(getOwnerToken())}`);
+      setSavedDecks(d.decks || []);
+    } catch (e) { /* offline / no decks yet — fine */ }
+  }
+  useEffect(() => { refreshDecks(); }, []);
 
   // Detect a return from Stripe Checkout (?checkout=success|cancel) and clean the URL.
   useEffect(() => {
@@ -955,58 +1018,126 @@ export default function SideQuest() {
     }
   }
 
-  async function persistDeckIndex(next) {
-    setSavedDecks(next);
-    try { await window.storage.set("deckIndex", JSON.stringify(next)); } catch (e) { console.warn("index save failed", e); }
-  }
-
-  // Save the current deck (full payload under its own key + a light index entry).
+  // Save the current deck to the server (fixes the localStorage-quota bug).
   async function saveCurrentDeck() {
     if (!cards.length) return;
+    if (!API_BASE) { setError("Saving needs the server — not configured."); return; }
     setSaveState("saving");
-    const id = currentDeckId || "deck_" + Date.now();
+    const id = currentDeckId || newId();
     const name = questPrompt.slice(0, 42) || eventType || "Untitled deck";
-    const payload = { id, name, user, eventType, theme, questPrompt, participants, categories, questCard, cards, arts, updatedAt: Date.now() };
+    const deck = { id, name, user, eventType, theme, questPrompt, participants, categories, questCard, cards, arts, updatedAt: Date.now() };
     try {
-      await window.storage.set("deck:" + id, JSON.stringify(payload));
-      const entry = { id, name, theme, eventType, count: cards.length, updatedAt: payload.updatedAt };
-      const next = [entry, ...savedDecks.filter((d) => d.id !== id)];
-      await persistDeckIndex(next);
-      setCurrentDeckId(id);
+      const r = await api("POST", "/api/sq/save", { ownerToken: getOwnerToken(), deck });
+      setCurrentDeckId(r.id);
+      if (r.collabToken) setCollabToken(r.collabToken);
       setSaveState("saved");
+      refreshDecks();
       setTimeout(() => setSaveState("idle"), 1800);
+      return r;
     } catch (e) {
-      console.error("save failed", e); setError("Couldn't save this deck."); setSaveState("idle");
+      console.error("save failed", e); setError("Couldn't save this deck: " + e.message); setSaveState("idle");
+      return null;
     }
+  }
+
+  // --- Share + async collaboration -----------------------------------------
+  const shareUrl = (id) => `${location.origin}${location.pathname}?deck=${id}`;
+  const collabUrl = (tok) => `${location.origin}${location.pathname}?collab=${tok}`;
+  function copyText(t) { try { navigator.clipboard.writeText(t); } catch (e) { /* ignore */ } }
+
+  async function ensureSaved() {
+    if (currentDeckId) return { id: currentDeckId, collabToken };
+    const r = await saveCurrentDeck();
+    return r ? { id: r.id, collabToken: r.collabToken } : null;
+  }
+
+  async function enableCollab() {
+    const s = await ensureSaved();
+    if (!s) return null;
+    try {
+      const r = await api("POST", `/api/sq/deck/${encodeURIComponent(s.id)}/collab`, { ownerToken: getOwnerToken() });
+      setCollabToken(r.collabToken);
+      return r.collabToken;
+    } catch (e) { setError("Couldn't enable collaboration: " + e.message); return null; }
+  }
+
+  // Contributor (or owner) pushes a single card to the shared deck.
+  async function collabSyncCard(uid) {
+    if (!collabToken) return;
+    const card = cards.find((c) => c.uid === uid);
+    if (!card) return;
+    try {
+      await api("POST", `/api/sq/collab/${encodeURIComponent(collabToken)}/card`, { card, byName: collabName || "Guest", art: arts[uid] || null });
+    } catch (e) { setError("Couldn't sync that card: " + e.message); }
+  }
+
+  // Contributor adds a blank card and opens the editor to fill it in.
+  function collabAddCard() {
+    if (collabMode) { try { localStorage.setItem("sq_name", collabName || ""); } catch (e) { /* ignore */ } }
+    const uid = "g_" + newId();
+    const who = collabName || "Guest";
+    const card = { uid, pid: null, category: "Guest Cards", realName: who, addedBy: who, title: "", typeLine: "Legendary Guest", cost: 3, power: 3, toughness: 3, ability: "", flavor: "", frame: "azure" };
+    setCards((cs) => [...cs, card]);
+    setFlipped((s) => ({ ...s, [uid]: true }));
+    setEditingUid(uid);
+  }
+
+  // Re-fetch the shared deck's cards (pull in others' contributions).
+  async function refreshCollab() {
+    if (!collabToken) return;
+    try {
+      const d = await api("GET", `/api/sq/collab/${encodeURIComponent(collabToken)}`);
+      const dk = d.deck || {};
+      setCards(dk.cards || []);
+      setArts(dk.arts || {});
+      setFlipped((prev) => { const fl = { ...prev }; (dk.cards || []).forEach((c) => { if (fl[c.uid] === undefined) fl[c.uid] = true; }); return fl; });
+      setCollabNew(0);
+    } catch (e) { /* ignore */ }
+  }
+
+  // Poll for others' changes while viewing a collab-enabled deck.
+  useEffect(() => {
+    if (!API_BASE || !collabToken || genState !== "done") return;
+    const iv = setInterval(async () => {
+      try {
+        const r = await api("GET", `/api/sq/collab/${encodeURIComponent(collabToken)}/poll?since=0`);
+        if (r && typeof r.count === "number") setCollabNew(Math.max(0, r.count - cards.length));
+      } catch (e) { /* not collab-enabled yet, or offline */ }
+    }, 5000);
+    return () => clearInterval(iv);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [collabToken, genState, cards.length]);
+
+  // Load a deck payload into state (shared helper for open / share / collab).
+  function loadDeckPayload(d, { collab = false } = {}) {
+    setUser(d.user || { name: "", email: "" });
+    setEventType(d.eventType); setTheme(d.theme); setQuestPrompt(d.questPrompt || "");
+    setParticipants(d.participants || []); setQuestCard(d.questCard || null);
+    setCategories(d.categories || []); setLoreSetting(null); setLoreOccasion(null);
+    const loaded = (d.cards || []).map((c, i) => {
+      if (c.uid) return c;
+      return { ...c, uid: `${c.realName}-${i}`, pid: c.pid ?? (d.participants && d.participants[i] ? d.participants[i].id : null) };
+    });
+    setCards(loaded); setArts(d.arts || {});
+    const fl = {}; loaded.forEach((c) => (fl[c.uid] = true)); setFlipped(fl);
+    setGenState("done"); setShowDecks(false); setLanding(false); setStep(3);
   }
 
   async function openDeck(id) {
     try {
-      const res = await window.storage.get("deck:" + id);
-      if (!res || !res.value) throw new Error("Deck not found");
-      const d = JSON.parse(res.value);
-      setUser(d.user || { name: "", email: "" });
-      setEventType(d.eventType); setTheme(d.theme); setQuestPrompt(d.questPrompt || "");
-      setParticipants(d.participants || []); setQuestCard(d.questCard || null);
-      setCategories(d.categories || []); setLoreSetting(null); setLoreOccasion(null);
-      // Backfill uid/pid for decks saved before these fields existed. Category
-      // (spec) cards already carry uid/pid — preserve them; only backfill true
-      // character cards that predate the field, and never pin a spec card to a
-      // participant.
-      const loaded = (d.cards || []).map((c, i) => {
-        if (c.uid) return c;
-        return { ...c, uid: `${c.realName}-${i}`, pid: c.pid ?? (d.participants && d.participants[i] ? d.participants[i].id : null) };
-      });
-      setCards(loaded); setArts(d.arts || {});
-      const fl = {}; loaded.forEach((c) => (fl[c.uid] = true)); setFlipped(fl);
-      setCurrentDeckId(d.id); setGenState("done"); setShowDecks(false);
-      setLanding(false); setStep(3);
+      const d = await api("GET", `/api/sq/deck/${encodeURIComponent(id)}`);
+      loadDeckPayload(d.deck || {});
+      setCurrentDeckId(d.id);
+      // fetch this deck's collab token from my list (if I own it)
+      const mine = (savedDecks || []).find((x) => x.id === id);
+      setCollabToken(mine?.collabToken || null);
+      setCollabMode(false);
     } catch (e) { setError("Couldn't open that deck."); }
   }
 
   async function deleteDeck(id) {
-    try { await window.storage.delete("deck:" + id); } catch (e) { /* ignore */ }
-    await persistDeckIndex(savedDecks.filter((d) => d.id !== id));
+    try { await api("DELETE", `/api/sq/deck/${encodeURIComponent(id)}?ownerToken=${encodeURIComponent(getOwnerToken())}`); } catch (e) { /* ignore */ }
+    setSavedDecks((prev) => prev.filter((d) => d.id !== id));
     if (currentDeckId === id) setCurrentDeckId(null);
   }
 
@@ -1015,8 +1146,35 @@ export default function SideQuest() {
     setTheme(null); setQuestPrompt(""); setParticipants([]); setQuestCard(null); setCategories([]);
     setLoreSetting(null); setLoreOccasion(null);
     setCards([]); setArts({}); setFlipped({}); setGenState("idle"); setOrderPlaced(false); setPhotoConsent(false);
+    setCollabToken(null); setCollabMode(false); setShareOpen(false); setCollabNew(0);
     setShowDecks(false); setLanding(false); setStep(0);
   }
+
+  // Open a deck from a ?deck=<id> (share) or ?collab=<token> (collaborate) link.
+  useEffect(() => {
+    if (!API_BASE) return;
+    const params = new URLSearchParams(window.location.search);
+    const deckId = params.get("deck");
+    const collab = params.get("collab");
+    if (!deckId && !collab) return;
+    (async () => {
+      try {
+        if (collab) {
+          const d = await api("GET", `/api/sq/collab/${encodeURIComponent(collab)}`);
+          loadDeckPayload(d.deck || {});
+          setCurrentDeckId(d.id); setCollabToken(collab); setCollabMode(true);
+          const saved = (() => { try { return localStorage.getItem("sq_name") || ""; } catch { return ""; } })();
+          setCollabName(saved);
+        } else {
+          const d = await api("GET", `/api/sq/deck/${encodeURIComponent(deckId)}`);
+          loadDeckPayload(d.deck || {});
+          setCurrentDeckId(null); // a shared view — "Save a copy" makes it yours
+          setCollabMode(false);
+        }
+      } catch (e) { setError("That link's deck couldn't be loaded (it may have been deleted)."); }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const themeObj = THEMES.find((t) => t.id === theme) || THEMES[1];
 
@@ -1105,23 +1263,20 @@ export default function SideQuest() {
     }
   }
 
-  // Collects the latest art from state at call time and writes the deck.
+  // Collects the latest art from state at call time and saves the deck to the server.
   function autoSave(src, qCard, ordered) {
+    if (!API_BASE) return;
     setArts((curArts) => {
-      const id = currentDeckId || "deck_" + Date.now();
+      const id = currentDeckId || newId();
       const name = (src.questPrompt || "").slice(0, 42) || src.eventType || "Untitled deck";
-      const payload = { id, name, user: src.user || user, eventType: src.eventType, theme: src.theme, questPrompt: src.questPrompt, participants: src.participants, categories: src.categories || [], questCard: qCard, cards: ordered, arts: curArts, updatedAt: Date.now() };
+      const deck = { id, name, user: src.user || user, eventType: src.eventType, theme: src.theme, questPrompt: src.questPrompt, participants: src.participants, categories: src.categories || [], questCard: qCard, cards: ordered, arts: curArts, updatedAt: Date.now() };
       (async () => {
         try {
-          await window.storage.set("deck:" + id, JSON.stringify(payload));
-          const entry = { id, name, theme: src.theme, eventType: src.eventType, count: ordered.length, updatedAt: payload.updatedAt };
-          setSavedDecks((prev) => {
-            const next = [entry, ...prev.filter((d) => d.id !== id)];
-            window.storage.set("deckIndex", JSON.stringify(next)).catch(() => {});
-            return next;
-          });
-          setCurrentDeckId(id);
-        } catch (e) { console.warn("autosave failed", e); }
+          const r = await api("POST", "/api/sq/save", { ownerToken: getOwnerToken(), deck });
+          setCurrentDeckId(r.id);
+          if (r.collabToken) setCollabToken(r.collabToken);
+          refreshDecks();
+        } catch (e) { console.warn("autosave failed", e.message); }
       })();
       return curArts; // no change to arts
     });
@@ -1345,19 +1500,46 @@ export default function SideQuest() {
                     <QuestBanner q={questCard} t={themeObj} />
                   </div>
                 )}
+                {collabMode && genState === "done" && (
+                  <CollabBanner name={collabName} setName={setCollabName} onAdd={collabAddCard} newCount={collabNew} onRefresh={refreshCollab} t={themeObj} />
+                )}
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
-                  <SectionLabel>{genState === "art" ? "Dealing your deck…" : "Your deck — tap to flip · double-click to enlarge & edit"}</SectionLabel>
+                  <SectionLabel>{genState === "art" ? "Dealing your deck…" : (collabMode ? "Shared deck — add or edit cards, everyone sees them" : "Your deck — tap to flip · double-click to enlarge & edit")}</SectionLabel>
                   {genState === "done" && (
                     <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                      <GhostButton onClick={() => setStep(1)}>← Edit cast</GhostButton>
-                      <GhostButton onClick={() => setStep(2)}>⚑ Edit deck</GhostButton>
-                      <GhostButton onClick={saveCurrentDeck}>
-                        {saveState === "saving" ? "Saving…" : saveState === "saved" ? "✓ Saved" : "⤓ Save deck"}
-                      </GhostButton>
-                      <PrimaryButton onClick={() => setStep(4)}>Order deck →</PrimaryButton>
+                      {!collabMode && collabNew > 0 && (
+                        <GhostButton onClick={refreshCollab}>🔄 {collabNew} new</GhostButton>
+                      )}
+                      {collabMode ? (
+                        <>
+                          {collabNew > 0 && <GhostButton onClick={refreshCollab}>🔄 {collabNew} new</GhostButton>}
+                          <PrimaryButton onClick={collabAddCard}>＋ Add my card</PrimaryButton>
+                        </>
+                      ) : (
+                        <>
+                          <GhostButton onClick={() => setStep(1)}>← Edit cast</GhostButton>
+                          <GhostButton onClick={() => setStep(2)}>⚑ Edit deck</GhostButton>
+                          <GhostButton onClick={saveCurrentDeck}>
+                            {saveState === "saving" ? "Saving…" : saveState === "saved" ? "✓ Saved" : "⤓ Save deck"}
+                          </GhostButton>
+                          <GhostButton onClick={async () => { await ensureSaved(); setShareOpen((v) => !v); }}>⤴ Share</GhostButton>
+                          <PrimaryButton onClick={() => setStep(4)}>Order deck →</PrimaryButton>
+                        </>
+                      )}
                     </div>
                   )}
                 </div>
+                {!collabMode && shareOpen && genState === "done" && (
+                  <SharePanel
+                    shareLink={currentDeckId ? shareUrl(currentDeckId) : ""}
+                    collabToken={collabToken}
+                    collabLink={collabToken ? collabUrl(collabToken) : ""}
+                    onEnableCollab={enableCollab}
+                    onCopy={copyText}
+                    onClose={() => setShareOpen(false)}
+                    t={themeObj}
+                  />
+                )}
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(232px, 1fr))", gap: 26, justifyItems: "center", marginTop: 18 }}>
                   {cards.map((c) => (
                     <GameCard key={c.uid} card={c} theme={themeObj} art={arts[c.uid]} loadingArt={loadingArt[c.uid]}
@@ -1434,7 +1616,7 @@ export default function SideQuest() {
           photo={(participants.find((p) => p.id === (cards.find((c) => c.uid === editingUid) || {}).pid) || {}).photo || null}
           loadingArt={loadingArt[editingUid]}
           busy={busyCard === editingUid}
-          onClose={() => setEditingUid(null)}
+          onClose={() => { const uid = editingUid; setEditingUid(null); if (collabMode) collabSyncCard(uid); }}
           onChange={(patch) => updateCard(editingUid, patch)}
           onRegenArt={(note) => regenArt(editingUid, note)}
           onRegenLore={AI_ENABLED && !(cards.find((c) => c.uid === editingUid) || {}).category ? () => regenLore(editingUid) : undefined}
