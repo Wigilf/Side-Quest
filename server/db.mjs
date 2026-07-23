@@ -10,12 +10,28 @@ export function dbEnabled() {
   return !!process.env.DATABASE_URL;
 }
 
+// Decide SSL from the connection string so any managed provider works
+// (Neon/Supabase/Render external all require SSL; localhost and Render's
+// internal dotless host do not). Honor an explicit ?sslmode= when present.
+function sslConfig(url) {
+  try {
+    const u = new URL(url);
+    const mode = u.searchParams.get("sslmode");
+    if (mode === "disable") return false;
+    if (mode) return { rejectUnauthorized: false }; // require/prefer/verify-*
+    const host = u.hostname;
+    if (host === "localhost" || host === "127.0.0.1" || !host.includes(".")) return false;
+    return { rejectUnauthorized: false }; // any remote managed host
+  } catch {
+    return false;
+  }
+}
+
 export async function getPool() {
   if (pool) return pool;
   if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is not set");
   const { default: pg } = await import("pg");
-  // Render's external host needs SSL; the internal host does not.
-  const ssl = process.env.DATABASE_URL.includes(".render.com") ? { rejectUnauthorized: false } : false;
+  const ssl = sslConfig(process.env.DATABASE_URL);
   pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, ssl, max: 5 });
   return pool;
 }
