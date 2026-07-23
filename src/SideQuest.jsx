@@ -295,11 +295,14 @@ async function regenerateOneCard({ eventType, theme, questPrompt, card }) {
 // ("nano-banana") to turn the real face into a themed character portrait.
 // Otherwise we return a procedural themed backdrop and the card layers the raw
 // photo on top (see GameCard) — no Google key ever touches the browser.
-async function generateCardArt({ photoBase64, frameAccent, themeStyle, seedStr, lore, refineNote }) {
-  if (API_BASE && photoBase64) {
+async function generateCardArt({ photoBase64, frameAccent, themeStyle, seedStr, lore, refineNote, objectMode, category }) {
+  // Portrait mode needs a face photo; object mode (artifacts/spells/NPCs/…) is
+  // text-to-image and needs no photo. Either way, call the backend when live.
+  if (API_BASE && (photoBase64 || objectMode)) {
     try {
       const d = await postJSON("/api/generate-art", {
-        photoBase64,
+        photoBase64: photoBase64 || undefined,
+        category: category || undefined,
         themeStyle,
         lore: { title: lore?.title, typeLine: lore?.typeLine },
         refineNote: refineNote || "",
@@ -930,7 +933,7 @@ export default function SideQuest() {
           const frAccent = (CARD_FRAMES.find((f) => f.key === c.frame) || CARD_FRAMES[0]).accent;
           // With a backend + photo -> real face->character art; otherwise a themed
           // backdrop the card layers the raw photo over.
-          const art = await generateCardArt({ photoBase64: part?.photo || null, frameAccent: frAccent, themeStyle: th.style, seedStr: c.realName + c.title, lore: c });
+          const art = await generateCardArt({ photoBase64: part?.photo || null, frameAccent: frAccent, themeStyle: th.style, seedStr: c.realName + c.title, lore: c, objectMode: !c.pid && !!c.category, category: c.category });
           setArts((s) => ({ ...s, [c.uid]: art }));
         } finally {
           setLoadingArt((s) => ({ ...s, [c.uid]: false }));
@@ -1031,7 +1034,7 @@ export default function SideQuest() {
       const card = cards.find((c) => c.uid === uid);
       const part = participants.find((p) => p.id === card.pid);
       const frAccent = (CARD_FRAMES.find((f) => f.key === card.frame) || CARD_FRAMES[0]).accent;
-      const art = await generateCardArt({ photoBase64: part?.photo || null, frameAccent: frAccent, themeStyle: themeObj.style, seedStr: card.realName + card.title + Math.random(), lore: card, refineNote });
+      const art = await generateCardArt({ photoBase64: part?.photo || null, frameAccent: frAccent, themeStyle: themeObj.style, seedStr: card.realName + card.title + Math.random(), lore: card, refineNote, objectMode: !card.pid && !!card.category, category: card.category });
       setArts((s) => ({ ...s, [uid]: art }));
     } catch (e) { setError(e.message); } finally { setLoadingArt((s) => ({ ...s, [uid]: false })); setBusyCard(null); }
   }

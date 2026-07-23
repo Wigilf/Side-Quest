@@ -209,10 +209,34 @@ function styleBrief(t) {
   }[t] || "cinematic painterly portrait";
 }
 
-// photoDataUrl: "data:image/jpeg;base64,...."; returns a data URL of generated art.
-async function generatePortrait({ photoDataUrl, themeStyle, lore, refineNote }) {
+// Shared Gemini image call. `parts` is the generateContent parts array (a text
+// part, optionally preceded by an inline_data image). Returns a data URL.
+async function callGeminiImage(parts) {
   const key = process.env.GOOGLE_API_KEY;
   if (!key) throw new Error("GOOGLE_API_KEY is not set on the server");
+  const url =
+    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_IMAGE_MODEL}:generateContent?key=` +
+    encodeURIComponent(key);
+  const res = await fetchWithTimeout(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ contents: [{ parts }] }),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`Gemini image error ${res.status}: ${detail.slice(0, 300)}`);
+  }
+  const body = await res.json();
+  const outParts = body?.candidates?.[0]?.content?.parts || [];
+  const img = outParts.find((p) => p.inline_data || p.inlineData);
+  const inline = img?.inline_data || img?.inlineData;
+  if (!inline?.data) throw new Error("Gemini returned no image (content may have been declined)");
+  const outMime = inline.mime_type || inline.mimeType || "image/png";
+  return `data:${outMime};base64,${inline.data}`;
+}
+
+// Character portrait from a real face (photoDataUrl: "data:image/jpeg;base64,…").
+async function generatePortrait({ photoDataUrl, themeStyle, lore, refineNote }) {
   const m = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/s.exec(photoDataUrl || "");
   if (!m) throw new Error("photoBase64 must be a data URL (data:image/...;base64,...)");
   const mimeType = m[1];
@@ -229,27 +253,25 @@ async function generatePortrait({ photoDataUrl, themeStyle, lore, refineNote }) 
     `Keep their recognizable likeness. No text, no card border, no watermark. ` +
     `${refineNote ? "Art direction: " + refineNote : ""}`.trim();
 
-  const url =
-    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_IMAGE_MODEL}:generateContent?key=` +
-    encodeURIComponent(key);
-  const res = await fetchWithTimeout(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ parts: [{ inline_data: { mime_type: mimeType, data } }, { text: prompt }] }],
-    }),
-  });
-  if (!res.ok) {
-    const detail = await res.text().catch(() => "");
-    throw new Error(`Gemini image error ${res.status}: ${detail.slice(0, 300)}`);
-  }
-  const body = await res.json();
-  const parts = body?.candidates?.[0]?.content?.parts || [];
-  const img = parts.find((p) => p.inline_data || p.inlineData);
-  const inline = img?.inline_data || img?.inlineData;
-  if (!inline?.data) throw new Error("Gemini returned no image (content may have been declined)");
-  const outMime = inline.mime_type || inline.mimeType || "image/png";
-  return `data:${outMime};base64,${inline.data}`;
+  return callGeminiImage([{ inline_data: { mime_type: mimeType, data }, }, { text: prompt }]);
+}
+
+// Text-to-image for NON-character cards (artifacts, spells, NPCs, locations…) —
+// no face reference. The type line tells the model what to depict.
+async function generateObjectArt({ themeStyle, lore, refineNote, category }) {
+  const title = lore?.title || "a mysterious relic";
+  const typeLine = lore?.typeLine || category || "Artifact";
+  const prompt =
+    `Paint an ORIGINAL trading-card illustration for "${title}" — a ${typeLine}. ` +
+    `Depict the card's subject exactly as its title and type imply: a creature or character, ` +
+    `an artifact or item, a spell effect, or a place/landscape, whichever fits. If it depicts ` +
+    `a person or creature, invent an entirely original character — do NOT depict any real, ` +
+    `specific, or recognizable person. Fully painted/illustrated — NOT a photograph. ` +
+    `Style: ${styleBrief(themeStyle)}. Iconic centered composition, dramatic lighting, rich ` +
+    `thematic background. No text, no card border, no watermark. ` +
+    `${refineNote ? "Art direction: " + refineNote : ""}`.trim();
+
+  return callGeminiImage([{ text: prompt }]);
 }
 
 // ---- Stripe checkout (dependency-free: raw REST + HMAC) -------------------
@@ -509,12 +531,9 @@ const routes = {
     return out;
   },
   "POST /api/generate-art": async (b) => ({
-    image: await generatePortrait({
-      photoDataUrl: b.photoBase64,
-      themeStyle: b.themeStyle,
-      lore: b.lore,
-      refineNote: b.refineNote,
-    }),
+    image: b.photoBase64
+      ? await generatePortrait({ photoDataUrl: b.photoBase64, themeStyle: b.themeStyle, lore: b.lore, refineNote: b.refineNote })
+      : await generateObjectArt({ themeStyle: b.themeStyle, lore: b.lore, refineNote: b.refineNote, category: b.category }),
   }),
 };
 
