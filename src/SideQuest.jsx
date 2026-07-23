@@ -848,9 +848,35 @@ function LoreLibrary({ settingId, occasionId, onPickSetting, onPickOccasion }) {
   const Group = LoreGroup;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16, marginBottom: 18, padding: 16, borderRadius: 12, border: "1px solid #2a2a33", background: "rgba(255,255,255,0.02)" }}>
-      <div style={{ fontSize: 13, color: "#c8c8d4", lineHeight: 1.4 }}>✨ Pick a <strong>setting</strong> (also styles the cards) and an <strong>occasion</strong> to auto-write a starting prompt — then personalize it below. Tap again to deselect.</div>
+      <div style={{ fontSize: 13, color: "#c8c8d4", lineHeight: 1.4 }}>✨ <strong>Start from a template:</strong> pick a <strong>setting</strong> (also styles the cards) and an <strong>occasion</strong> to auto-write a starting prompt. Tap again to deselect — or skip these and just write your own below.</div>
       <Group label="Setting — the world" items={SETTING_LORES} activeId={settingId} onPick={onPickSetting} />
       <Group label="Occasion — the vibe" items={EVENT_LORES} activeId={occasionId} onPick={onPickOccasion} />
+    </div>
+  );
+}
+
+// Compact visual-theme picker. A chosen Setting sets this automatically; writing
+// your own quest? Pick the card look here.
+function CardStylePicker({ themeId, onPick }) {
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ fontFamily: UI_FONT, fontSize: 12, letterSpacing: 0.4, textTransform: "uppercase", color: "#8a8a98", marginBottom: 8 }}>Card style <span style={{ textTransform: "none", letterSpacing: 0, color: "#6c6c78" }}>— how the cards look (a setting sets this for you)</span></div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+        {THEMES.map((t) => {
+          const active = t.id === themeId;
+          return (
+            <button key={t.id} onClick={() => onPick(t.id)} style={{
+              display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", borderRadius: 999, cursor: "pointer",
+              border: `1px solid ${active ? t.accent : "#3a3a45"}`, background: active ? `${t.accent}18` : "rgba(255,255,255,0.04)", transition: "all .15s",
+            }}>
+              <span style={{ display: "flex", gap: 3 }}>
+                {t.swatch.map((c, i) => <span key={i} style={{ width: 10, height: 10, borderRadius: 3, background: c, border: "1px solid rgba(255,255,255,0.12)" }} />)}
+              </span>
+              <span style={{ fontFamily: UI_FONT, fontSize: 13, color: active ? t.accent : "#dcdce4", fontWeight: active ? 700 : 500, whiteSpace: "nowrap" }}>{t.label}</span>
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -1236,10 +1262,12 @@ export default function SideQuest() {
 
         {/* STEP 0: QUEST (world + occasion + description) */}
         {step === 0 && (
-          <Panel title="Set the scene" sub="Choose a world and an occasion — that sets both the card style and the story — or write your own. Claude turns it into your deck's lore.">
+          <Panel title="Set the scene" sub="Start from a template below, or just write your own quest — either way Claude turns it into your deck's lore.">
             <LoreLibrary settingId={loreSetting} occasionId={loreOccasion} onPickSetting={pickSetting} onPickOccasion={pickOccasion} />
+            <CardStylePicker themeId={theme || "lotr"} onPick={setTheme} />
+            <div style={{ fontFamily: UI_FONT, fontSize: 12, letterSpacing: 0.4, textTransform: "uppercase", color: "#8a8a98", marginBottom: 8 }}>Your quest</div>
             <textarea value={questPrompt} onChange={(e) => setQuestPrompt(e.target.value)} rows={8}
-              placeholder="e.g. Dave's bachelor party in Lisbon. Complete dares across the city to 'earn back' his freedom before the wedding. He fears seagulls and loves bad karaoke."
+              placeholder="Write your own, or edit a template. e.g. Dave's bachelor party in Lisbon — complete dares across the city to 'earn back' his freedom before the wedding. He fears seagulls and loves bad karaoke."
               style={{ ...inputStyle, resize: "vertical", lineHeight: 1.5 }} />
             <div style={{ fontSize: 12, color: "#7a7a88", marginTop: 8 }}>Tip: name the guest of honor, the place, and a couple personal details for sharper cards.</div>
             <NavRow onNext={() => setStep(1)} nextOk={canNext[0]} />
