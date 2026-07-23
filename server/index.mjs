@@ -389,6 +389,31 @@ function loreOnePrompt({ eventType, theme, questPrompt, card }) {
   return `Reinvent ONE Side Quest character card with a fresh, different take. Event: ${eventType}. Theme: ${theme}. Group goal: "${questPrompt}". Keep realName="${card.realName}" exactly. JSON shape: {"realName","title","typeLine","cost","power","toughness","ability","flavor","frame"}. Make it noticeably different from previous: title "${card.title}", ability "${card.ability}". Return ONLY the JSON object.`;
 }
 
+// Suggest a batch of NON-character cards (artifacts, spells, NPCs, locations…)
+// for one user-defined category, tailored to the quest lore. Starting points the
+// user then edits — not the guests/heroes.
+function suggestCardsPrompt({ eventType, theme, questPrompt, category, count }) {
+  const n = Math.max(1, Math.min(6, Number(count) || 3));
+  return `You are the loremaster for "Side Quest", turning real events into playable Magic: The Gathering–style card decks.
+
+EVENT TYPE: ${eventType}
+THEME / FEELING: ${theme}
+ORGANIZER'S QUEST GOAL: "${questPrompt}"
+CARD CATEGORY TO DESIGN: "${category}"
+
+Invent ${n} playable "${category}" cards that enrich THIS quest's world and tone — fun, a little roasty but warm, PG-13. These are NOT the human guests/heroes; they are ${category} that support the story. Each card needs:
+- "title": evocative name fitting the theme and the "${category}" category
+- "typeLine": MTG-style type line appropriate to a ${category} (artifacts → "Artifact — Relic"; spells → "Sorcery" or "Instant"; NPCs → "Legendary Creature — …"; locations → "Land — …")
+- "cost": 0-7 integer
+- "power": 0-9 integer (use 0 for non-creatures such as spells, artifacts, and locations)
+- "toughness": 0-9 integer (use 0 for non-creatures)
+- "ability": one short rules-style ability tied to the EVENT/quest (1 sentence)
+- "flavor": one flavor quote, max 18 words
+- "frame": one of "gold","azure","crimson","verdant","violet"
+
+Return ONLY JSON: {"cards":[{...}]} with exactly ${n} cards.`;
+}
+
 // ---- HTTP plumbing --------------------------------------------------------
 
 function corsHeaders(origin) {
@@ -409,7 +434,7 @@ function send(res, status, obj, origin) {
 }
 
 // --- in-memory rate limiter + daily generation cap ------------------------
-const PAID = new Set(["/api/generate-lore", "/api/regenerate-lore", "/api/generate-art"]);
+const PAID = new Set(["/api/generate-lore", "/api/regenerate-lore", "/api/generate-art", "/api/suggest-cards"]);
 const hits = new Map(); // ip -> number[] (recent request timestamps, monotonic ms)
 let dayCount = 0;
 let dayStart = 0;
@@ -478,6 +503,11 @@ const routes = {
     return lore;
   },
   "POST /api/regenerate-lore": async (b) => callClaude(loreOnePrompt(b), { json: true, maxTokens: 700 }),
+  "POST /api/suggest-cards": async (b) => {
+    const out = await callClaude(suggestCardsPrompt(b), { json: true, maxTokens: 1400 });
+    if (!out || !Array.isArray(out.cards) || out.cards.length === 0) throw new Error("empty suggestions");
+    return out;
+  },
   "POST /api/generate-art": async (b) => ({
     image: await generatePortrait({
       photoDataUrl: b.photoBase64,

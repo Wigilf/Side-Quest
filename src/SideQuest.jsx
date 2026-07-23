@@ -81,7 +81,44 @@ const CARD_FRAMES = [
   { key: "violet", accent: "#b15bef" },
 ];
 
-const STEPS = ["Event", "World", "Quest", "Cast", "Reveal", "Order"];
+const STEPS = ["Event", "World", "Quest", "Cast", "Build", "Reveal", "Order"];
+
+// Deck Builder — non-character card categories. Each preset ships with a couple
+// of static template cards (an instant starting ground); "Suggest from lore"
+// swaps in AI-tailored ones. Users can also add fully custom categories.
+const FRAME_KEYS = ["gold", "azure", "crimson", "verdant", "violet"];
+const CATEGORY_TEMPLATES = {
+  NPCs: [
+    { title: "The Wandering Merchant", typeLine: "Legendary Creature — Merchant NPC", cost: 3, power: 2, toughness: 3, ability: "Once per quest, swap any item in your hand for one from the discard pile.", flavor: "“Everything's for sale. Especially secrets.”" },
+    { title: "The Gatekeeper", typeLine: "Creature — Guardian NPC", cost: 4, power: 3, toughness: 5, ability: "Opponents must answer a riddle or skip their next challenge.", flavor: "“None shall pass — unless you know the password.”" },
+  ],
+  Artifacts: [
+    { title: "Ancient Relic", typeLine: "Artifact — Relic", cost: 2, power: 0, toughness: 0, ability: "Tap to draw a card; if it's a spell, cast it for free.", flavor: "“Older than the quest itself.”" },
+    { title: "Enchanted Compass", typeLine: "Artifact — Equipment", cost: 1, power: 0, toughness: 0, ability: "The equipped hero cannot be misled or lost during any challenge.", flavor: "“It points not north, but home.”" },
+  ],
+  Spells: [
+    { title: "Arcane Bolt", typeLine: "Sorcery", cost: 2, power: 0, toughness: 0, ability: "Deal 3 damage to any target; draw a card if it resolved a challenge.", flavor: "“Aim first. Apologize later.”" },
+    { title: "Rally the Party", typeLine: "Instant", cost: 3, power: 0, toughness: 0, ability: "All heroes gain +1/+1 until the end of the current challenge.", flavor: "“One more round. For glory.”" },
+  ],
+  Locations: [
+    { title: "The Forgotten Tavern", typeLine: "Land — Location", cost: 0, power: 0, toughness: 0, ability: "Tap: a hero here recovers and readies for the next challenge.", flavor: "“Every quest begins and ends at the bar.”" },
+  ],
+  Creatures: [
+    { title: "Loyal Companion", typeLine: "Creature — Beast", cost: 2, power: 2, toughness: 2, ability: "Whenever your hero takes on a challenge, this creature joins them.", flavor: "“Good boy. Terrifying, but good.”" },
+  ],
+};
+const CATEGORY_PRESET_NAMES = ["NPCs", "Artifacts", "Spells", "Locations", "Creatures"];
+
+let _specSeq = 0;
+function makeSpecCard(tpl = {}, i = 0) {
+  _specSeq += 1;
+  return {
+    id: "sc_" + Date.now().toString(36) + "_" + _specSeq,
+    frame: FRAME_KEYS[i % FRAME_KEYS.length],
+    title: "", typeLine: "", cost: 1, power: 0, toughness: 0, ability: "", flavor: "",
+    ...tpl,
+  };
+}
 
 // Pre-built example so a pitch can jump straight to the payoff.
 const DEMO = {
@@ -616,6 +653,93 @@ function CardEditorModal({ card, theme, art, photo, loadingArt, busy, onClose, o
 }
 
 // ---------------------------------------------------------------------------
+// DECK BUILDER — user-defined categories of non-character cards
+// ---------------------------------------------------------------------------
+function builderBtn(active) {
+  return { fontFamily: UI_FONT, fontSize: 13, fontWeight: 500, padding: "8px 12px", borderRadius: 8, cursor: active ? "wait" : "pointer", color: "#e8e8f0", background: "rgba(255,255,255,0.05)", border: "1px solid #3a3a45", opacity: active ? 0.6 : 1 };
+}
+function presetChip(used) {
+  return { fontFamily: UI_FONT, fontSize: 13, padding: "7px 12px", borderRadius: 999, cursor: used ? "default" : "pointer", color: used ? "#5a5a66" : "#e8e8f0", background: used ? "rgba(255,255,255,0.02)" : "rgba(255,255,255,0.05)", border: `1px solid ${used ? "#2a2a32" : "#3a3a45"}`, opacity: used ? 0.6 : 1 };
+}
+
+// One editable spec card (no art yet — lore fields only).
+function SpecCardEditor({ card, onChange, onRemove }) {
+  const fr = CARD_FRAMES.find((f) => f.key === card.frame) || CARD_FRAMES[0];
+  const set = (k) => (e) => onChange({ [k]: e.target.value });
+  const setNum = (k) => (e) => onChange({ [k]: e.target.value.replace(/[^0-9]/g, "").slice(0, 2) });
+  const inp = { width: "100%", boxSizing: "border-box", fontFamily: UI_FONT, fontSize: 12, padding: "6px 8px", borderRadius: 6, color: "#f0f0f6", background: "rgba(0,0,0,0.35)", border: `1px solid ${fr.accent}44`, outline: "none" };
+  return (
+    <div style={{ border: `1px solid ${fr.accent}66`, borderRadius: 10, padding: 10, background: "rgba(0,0,0,0.25)", display: "flex", flexDirection: "column", gap: 6, position: "relative" }}>
+      <button onClick={onRemove} title="Remove card" style={{ position: "absolute", top: 6, right: 6, background: "transparent", border: "none", color: "#8a8a98", cursor: "pointer", fontSize: 13, lineHeight: 1 }}>✕</button>
+      <input value={card.title || ""} onChange={set("title")} placeholder="Card title" style={{ ...inp, fontWeight: 700, paddingRight: 22 }} />
+      <input value={card.typeLine || ""} onChange={set("typeLine")} placeholder="Type line" style={inp} />
+      <div style={{ display: "flex", gap: 6 }}>
+        <input value={card.cost ?? ""} onChange={setNum("cost")} inputMode="numeric" placeholder="Cost" title="Cost" style={inp} />
+        <input value={card.power ?? ""} onChange={setNum("power")} inputMode="numeric" placeholder="Pow" title="Power" style={inp} />
+        <input value={card.toughness ?? ""} onChange={setNum("toughness")} inputMode="numeric" placeholder="Tuf" title="Toughness" style={inp} />
+      </div>
+      <textarea value={card.ability || ""} onChange={set("ability")} placeholder="Ability" style={{ ...inp, minHeight: 46, resize: "vertical", lineHeight: 1.3 }} />
+      <textarea value={card.flavor || ""} onChange={set("flavor")} placeholder="Flavor quote" style={{ ...inp, minHeight: 34, resize: "vertical", lineHeight: 1.3, fontStyle: "italic" }} />
+    </div>
+  );
+}
+
+function DeckBuilder({ theme, categories, suggestingCat, aiEnabled, onAddCategory, onRemoveCategory, onRenameCategory, onAddCard, onUpdateCard, onRemoveCard, onSuggest }) {
+  const [custom, setCustom] = useState("");
+  const usedNames = new Set(categories.map((c) => (c.name || "").toLowerCase()));
+  const addCustom = () => { const v = custom.trim(); if (v) { onAddCategory(v); setCustom(""); } };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      {categories.length === 0 && (
+        <div style={{ textAlign: "center", color: "#8a8a98", fontSize: 14, padding: "6px 0 2px" }}>
+          Your heroes are already covered by the Cast. Add a category below to bring in NPCs, artifacts, spells, and more.
+        </div>
+      )}
+      {categories.map((cat) => {
+        const busy = suggestingCat === cat.id;
+        return (
+          <div key={cat.id} style={{ border: "1px solid #33333e", borderRadius: 14, background: "rgba(255,255,255,0.02)", overflow: "hidden" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", borderBottom: "1px solid #26262e", background: "rgba(0,0,0,0.2)" }}>
+              <input value={cat.name} onChange={(e) => onRenameCategory(cat.id, e.target.value)} aria-label="Category name" style={{ fontFamily: theme.displayFont, fontWeight: 700, fontSize: 16, color: "#f4f4fa", background: "transparent", border: "none", outline: "none", flex: 1, minWidth: 0 }} />
+              <span style={{ fontFamily: UI_FONT, fontSize: 12, color: "#8a8a98" }}>{cat.cards.length} card{cat.cards.length === 1 ? "" : "s"}</span>
+              <button onClick={() => onRemoveCategory(cat.id)} title="Remove category" style={{ background: "transparent", border: "none", color: "#8a8a98", cursor: "pointer", fontSize: 15, lineHeight: 1 }}>✕</button>
+            </div>
+            {cat.cards.length > 0 && (
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 12, padding: 14 }}>
+                {cat.cards.map((sc) => (
+                  <SpecCardEditor key={sc.id} card={sc} onChange={(patch) => onUpdateCard(cat.id, sc.id, patch)} onRemove={() => onRemoveCard(cat.id, sc.id)} />
+                ))}
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 8, padding: cat.cards.length ? "0 14px 14px" : "14px", flexWrap: "wrap" }}>
+              <button onClick={() => onAddCard(cat.id)} style={builderBtn(false)}>＋ Add card</button>
+              {aiEnabled && (
+                <button onClick={() => onSuggest(cat.id, cat.name)} disabled={busy} style={builderBtn(busy)}>
+                  {busy ? "Conjuring…" : "✦ Suggest from lore"}
+                </button>
+              )}
+            </div>
+          </div>
+        );
+      })}
+      <div style={{ border: "1px dashed #44444f", borderRadius: 14, padding: 16 }}>
+        <div style={{ fontFamily: UI_FONT, fontSize: 12, letterSpacing: 0.4, textTransform: "uppercase", color: "#8a8a98", marginBottom: 10 }}>Add a category</div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
+          {CATEGORY_PRESET_NAMES.map((n) => {
+            const used = usedNames.has(n.toLowerCase());
+            return <button key={n} onClick={() => !used && onAddCategory(n)} disabled={used} style={presetChip(used)}>+ {n}</button>;
+          })}
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input value={custom} onChange={(e) => setCustom(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addCustom(); }} placeholder="Custom category name…" style={{ flex: 1, boxSizing: "border-box", fontFamily: UI_FONT, fontSize: 13, padding: "9px 11px", borderRadius: 8, color: "#f0f0f6", background: "rgba(0,0,0,0.35)", border: "1px solid #3a3a45", outline: "none" }} />
+          <button onClick={addCustom} style={builderBtn(false)}>Add</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // MAIN APP
 // ---------------------------------------------------------------------------
 
@@ -631,6 +755,8 @@ export default function SideQuest() {
   const [participants, setParticipants] = useState([]);
 
   const [questCard, setQuestCard] = useState(null);
+  const [categories, setCategories] = useState([]); // [{ id, name, cards: [specCard] }]
+  const [suggestingCat, setSuggestingCat] = useState(null); // category id currently fetching AI suggestions
   const [cards, setCards] = useState([]);
   const [arts, setArts] = useState({});
   const [loadingArt, setLoadingArt] = useState({});
@@ -696,7 +822,7 @@ export default function SideQuest() {
     setSaveState("saving");
     const id = currentDeckId || "deck_" + Date.now();
     const name = questPrompt.slice(0, 42) || (EVENT_TYPES.find((e) => e.id === eventType)?.label ?? "Untitled deck");
-    const payload = { id, name, user, eventType, theme, questPrompt, participants, questCard, cards, arts, updatedAt: Date.now() };
+    const payload = { id, name, user, eventType, theme, questPrompt, participants, categories, questCard, cards, arts, updatedAt: Date.now() };
     try {
       await window.storage.set("deck:" + id, JSON.stringify(payload));
       const entry = { id, name, theme, eventType, count: cards.length, updatedAt: payload.updatedAt };
@@ -718,15 +844,19 @@ export default function SideQuest() {
       setUser(d.user || { name: "", email: "" });
       setEventType(d.eventType); setTheme(d.theme); setQuestPrompt(d.questPrompt || "");
       setParticipants(d.participants || []); setQuestCard(d.questCard || null);
-      // Backfill uid/pid for decks saved before this field existed.
-      const loaded = (d.cards || []).map((c, i) => ({
-        ...c, uid: c.uid ?? `${c.realName}-${i}`,
-        pid: c.pid ?? (d.participants && d.participants[i] ? d.participants[i].id : null),
-      }));
+      setCategories(d.categories || []);
+      // Backfill uid/pid for decks saved before these fields existed. Category
+      // (spec) cards already carry uid/pid — preserve them; only backfill true
+      // character cards that predate the field, and never pin a spec card to a
+      // participant.
+      const loaded = (d.cards || []).map((c, i) => {
+        if (c.uid) return c;
+        return { ...c, uid: `${c.realName}-${i}`, pid: c.pid ?? (d.participants && d.participants[i] ? d.participants[i].id : null) };
+      });
       setCards(loaded); setArts(d.arts || {});
       const fl = {}; loaded.forEach((c) => (fl[c.uid] = true)); setFlipped(fl);
       setCurrentDeckId(d.id); setGenState("done"); setShowDecks(false);
-      setLanding(false); setStep(4);
+      setLanding(false); setStep(5);
     } catch (e) { setError("Couldn't open that deck."); }
   }
 
@@ -738,7 +868,7 @@ export default function SideQuest() {
 
   function newDeck() {
     setCurrentDeckId(null); setUser({ name: "", email: "" }); setEventType(null);
-    setTheme(null); setQuestPrompt(""); setParticipants([]); setQuestCard(null);
+    setTheme(null); setQuestPrompt(""); setParticipants([]); setQuestCard(null); setCategories([]);
     setCards([]); setArts({}); setFlipped({}); setGenState("idle"); setOrderPlaced(false); setPhotoConsent(false);
     setShowDecks(false); setLanding(false); setStep(0);
   }
@@ -760,8 +890,8 @@ export default function SideQuest() {
   }
 
   async function runGeneration(override) {
-    const src = override || { eventType, theme, questPrompt, participants };
-    setError(""); setGenState("lore"); setStep(4); setFlipped({});
+    const src = override || { eventType, theme, questPrompt, participants, categories };
+    setError(""); setGenState("lore"); setStep(5); setFlipped({});
     try {
       // --- Lore: live Claude call, with a baked-in fallback for stage safety ---
       let lore;
@@ -780,13 +910,20 @@ export default function SideQuest() {
         const p = src.participants[i];
         return { ...c, uid: p && p.id != null ? String(p.id) : `${c.realName}-${i}`, pid: p ? p.id : null };
       });
-      setCards(ordered);
+      // Fold in the user-built category cards (NPCs, artifacts, spells…). Their
+      // lore is already authored (from templates or AI suggestions, then edited),
+      // so they only need art. No face photo → themed backdrop.
+      const specCards = (src.categories || []).flatMap((cat) =>
+        (cat.cards || []).map((sc) => ({ ...sc, realName: cat.name, category: cat.name, uid: "spec_" + sc.id, pid: null }))
+      );
+      const deck = [...ordered, ...specCards];
+      setCards(deck);
       setGenState("art");
       const th = THEMES.find((t) => t.id === src.theme) || THEMES[1];
       // Flips stay on a fixed, staggered timeline for drama...
-      ordered.forEach((c, i) => setTimeout(() => setFlipped((s) => ({ ...s, [c.uid]: true })), 250 + i * 320));
-      // ...but paint every card's art in parallel so a large cast isn't stuck in a slow queue.
-      await Promise.all(ordered.map(async (c) => {
+      deck.forEach((c, i) => setTimeout(() => setFlipped((s) => ({ ...s, [c.uid]: true })), 250 + i * 220));
+      // ...but paint every card's art in parallel so a large deck isn't stuck in a slow queue.
+      await Promise.all(deck.map(async (c) => {
         const part = src.participants.find((p) => p.id === c.pid);
         setLoadingArt((s) => ({ ...s, [c.uid]: true }));
         try {
@@ -801,7 +938,7 @@ export default function SideQuest() {
       }));
       setGenState("done");
       // Auto-save so the deck survives a refresh — captured locally to avoid stale state.
-      setTimeout(() => autoSave(src, lore.questCard, ordered), 400);
+      setTimeout(() => autoSave(src, lore.questCard, deck), 400);
     } catch (e) {
       console.error(e); setError(e.message || "Generation failed"); setGenState("error");
     }
@@ -812,7 +949,7 @@ export default function SideQuest() {
     setArts((curArts) => {
       const id = currentDeckId || "deck_" + Date.now();
       const name = (src.questPrompt || "").slice(0, 42) || (EVENT_TYPES.find((e) => e.id === src.eventType)?.label ?? "Untitled deck");
-      const payload = { id, name, user: src.user || user, eventType: src.eventType, theme: src.theme, questPrompt: src.questPrompt, participants: src.participants, questCard: qCard, cards: ordered, arts: curArts, updatedAt: Date.now() };
+      const payload = { id, name, user: src.user || user, eventType: src.eventType, theme: src.theme, questPrompt: src.questPrompt, participants: src.participants, categories: src.categories || [], questCard: qCard, cards: ordered, arts: curArts, updatedAt: Date.now() };
       (async () => {
         try {
           await window.storage.set("deck:" + id, JSON.stringify(payload));
@@ -832,6 +969,49 @@ export default function SideQuest() {
   // Merge manual field edits (from the enlarge/edit modal) into a card.
   function updateCard(uid, patch) {
     setCards((cs) => cs.map((c) => (c.uid === uid ? { ...c, ...patch } : c)));
+  }
+
+  // ---- Deck Builder: category + spec-card management ----------------------
+  function addCategory(name) {
+    const clean = (name || "").trim();
+    if (!clean) return;
+    const tpls = CATEGORY_TEMPLATES[clean] || [];
+    setCategories((cs) => [...cs, {
+      id: "cat_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 6),
+      name: clean,
+      cards: tpls.map((t, i) => makeSpecCard(t, i)),
+    }]);
+  }
+  function removeCategory(catId) { setCategories((cs) => cs.filter((c) => c.id !== catId)); }
+  function renameCategory(catId, name) { setCategories((cs) => cs.map((c) => (c.id === catId ? { ...c, name } : c))); }
+  function addSpecCard(catId) {
+    setCategories((cs) => cs.map((c) => {
+      if (c.id !== catId) return c;
+      const pool = CATEGORY_TEMPLATES[c.name] || [];
+      const seed = pool.length ? pool[c.cards.length % pool.length] : {};
+      return { ...c, cards: [...c.cards, makeSpecCard(seed, c.cards.length)] };
+    }));
+  }
+  function updateSpecCard(catId, cardId, patch) {
+    setCategories((cs) => cs.map((c) => (c.id !== catId ? c : { ...c, cards: c.cards.map((x) => (x.id === cardId ? { ...x, ...patch } : x)) })));
+  }
+  function removeSpecCard(catId, cardId) {
+    setCategories((cs) => cs.map((c) => (c.id !== catId ? c : { ...c, cards: c.cards.filter((x) => x.id !== cardId) })));
+  }
+  async function suggestForCategory(catId, name) {
+    if (!AI_ENABLED) return;
+    setSuggestingCat(catId);
+    try {
+      const d = await postJSON("/api/suggest-cards", { eventType, theme, questPrompt, category: name, count: 3 });
+      const fresh = (d.cards || []).map((c, i) => makeSpecCard(c, i));
+      if (fresh.length) setCategories((cs) => cs.map((c) => (c.id === catId ? { ...c, cards: [...c.cards, ...fresh] } : c)));
+    } catch (e) {
+      console.warn("suggest-cards failed:", e.message);
+      setError("Couldn't fetch AI suggestions — the templates are still here to edit.");
+      setTimeout(() => setError(""), 4000);
+    } finally {
+      setSuggestingCat(null);
+    }
   }
 
   async function regenLore(uid) {
@@ -1001,12 +1181,32 @@ export default function SideQuest() {
                 <span>I confirm I have permission from everyone whose photo I uploaded to use their likeness to generate character art.</span>
               </label>
             )}
-            <NavRow onBack={() => setStep(2)} onNext={() => runGeneration()} nextOk={canNext[3]} nextLabel="✦ Generate deck" />
+            <NavRow onBack={() => setStep(2)} onNext={() => setStep(4)} nextOk={canNext[3]} nextLabel="Next: build deck →" />
           </Panel>
         )}
 
-        {/* STEP 4: REVEAL */}
+        {/* STEP 4: DECK BUILDER */}
         {step === 4 && (
+          <Panel title="Build your deck" sub="Beyond the heroes, add categories of cards — NPCs, artifacts, spells, whatever fits. Each starts from templates; hit ‘Suggest from lore’ to tailor them to your quest. All cards stay fully editable.">
+            <DeckBuilder
+              theme={themeObj}
+              categories={categories}
+              suggestingCat={suggestingCat}
+              aiEnabled={AI_ENABLED}
+              onAddCategory={addCategory}
+              onRemoveCategory={removeCategory}
+              onRenameCategory={renameCategory}
+              onAddCard={addSpecCard}
+              onUpdateCard={updateSpecCard}
+              onRemoveCard={removeSpecCard}
+              onSuggest={suggestForCategory}
+            />
+            <NavRow onBack={() => setStep(3)} onNext={() => runGeneration()} nextOk nextLabel="✦ Generate deck" />
+          </Panel>
+        )}
+
+        {/* STEP 5: REVEAL */}
+        {step === 5 && (
           <div>
             {genState === "lore" && <BigLoader label="Claude is writing your deck's lore…" />}
             {(genState === "art" || genState === "done") && (
@@ -1022,10 +1222,11 @@ export default function SideQuest() {
                   {genState === "done" && (
                     <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
                       <GhostButton onClick={() => setStep(3)}>← Edit cast</GhostButton>
+                      <GhostButton onClick={() => setStep(4)}>⚑ Edit deck</GhostButton>
                       <GhostButton onClick={saveCurrentDeck}>
                         {saveState === "saving" ? "Saving…" : saveState === "saved" ? "✓ Saved" : "⤓ Save deck"}
                       </GhostButton>
-                      <PrimaryButton onClick={() => setStep(5)}>Order deck →</PrimaryButton>
+                      <PrimaryButton onClick={() => setStep(6)}>Order deck →</PrimaryButton>
                     </div>
                   )}
                 </div>
@@ -1049,8 +1250,8 @@ export default function SideQuest() {
           </div>
         )}
 
-        {/* STEP 5: ORDER */}
-        {step === 5 && (
+        {/* STEP 6: ORDER */}
+        {step === 6 && (
           <Panel title="Ship the real thing" sub="Premium card stock, full-bleed art, custom tuck box.">
             <div style={{ display: "flex", gap: 30, flexWrap: "wrap", alignItems: "center", justifyContent: "center" }}>
               <div style={{ display: "flex" }}>
@@ -1084,7 +1285,7 @@ export default function SideQuest() {
                 ) : (
                   <PrimaryButton onClick={() => setOrderPlaced(true)} style={{ width: "100%" }}>Order physical deck</PrimaryButton>
                 )}
-                <GhostButton onClick={() => { setOrderPlaced(false); setStep(4); }} style={{ width: "100%", marginTop: 10 }}>← Back to deck</GhostButton>
+                <GhostButton onClick={() => { setOrderPlaced(false); setStep(5); }} style={{ width: "100%", marginTop: 10 }}>← Back to deck</GhostButton>
               </div>
             </div>
           </Panel>
