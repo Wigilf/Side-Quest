@@ -886,11 +886,14 @@ function LoreGroup({ label, items, activeId, onPick }) {
     </div>
   );
 }
-function LoreLibrary({ settingId, occasionId, onPickSetting, onPickOccasion }) {
+function LoreLibrary({ settingId, occasionId, onPickSetting, onPickOccasion, t }) {
   const Group = LoreGroup;
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16, marginBottom: 18, padding: 16, borderRadius: 12, border: "1px solid #2a2a33", background: "rgba(255,255,255,0.02)" }}>
-      <div style={{ fontSize: 13, color: "#c8c8d4", lineHeight: 1.4 }}>✨ <strong>Start from a template:</strong> pick a <strong>setting</strong> (also styles the cards) and an <strong>occasion</strong> to auto-write a starting prompt. Tap again to deselect — or skip these and just write your own below.</div>
+    <div style={{ display: "flex", flexDirection: "column", gap: 16, padding: 16, borderRadius: 12, border: "1px solid #2a2a33", background: "rgba(255,255,255,0.02)" }}>
+      <div>
+        <div style={{ fontFamily: (t && t.displayFont) || UI_FONT, fontWeight: 700, fontSize: 16, color: "#f4f4fa", marginBottom: 4 }}>✨ Ready-made lores</div>
+        <div style={{ fontSize: 13, color: "#8a8a98", lineHeight: 1.4 }}>Pick a <strong>setting</strong> and an <strong>occasion</strong> — we auto-write the quest and match the card style. Tap again to deselect.</div>
+      </div>
       <Group label="Setting — the world" items={SETTING_LORES} activeId={settingId} onPick={onPickSetting} />
       <Group label="Occasion — the vibe" items={EVENT_LORES} activeId={occasionId} onPick={onPickOccasion} />
     </div>
@@ -901,7 +904,7 @@ function LoreLibrary({ settingId, occasionId, onPickSetting, onPickOccasion }) {
 // your own quest? Pick the card look here.
 function CardStylePicker({ themeId, onPick }) {
   return (
-    <div style={{ marginBottom: 16 }}>
+    <div style={{ margin: "20px 0 4px" }}>
       <div style={{ fontFamily: UI_FONT, fontSize: 12, letterSpacing: 0.4, textTransform: "uppercase", color: "#8a8a98", marginBottom: 8 }}>Card style <span style={{ textTransform: "none", letterSpacing: 0, color: "#6c6c78" }}>— how the cards look (a setting sets this for you)</span></div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
         {THEMES.map((t) => {
@@ -1553,15 +1556,29 @@ export default function SideQuest() {
 
         {/* STEP 0: QUEST (world + occasion + description) */}
         {step === 0 && (
-          <Panel title="Set the scene" sub="Start from a template below, or just write your own quest — either way Side Quest turns it into your deck's lore.">
-            <LoreLibrary settingId={loreSetting} occasionId={loreOccasion} onPickSetting={pickSetting} onPickOccasion={pickOccasion} />
+          <Panel title="Set the scene" sub="Grab a ready-made world, or forge your own lore from scratch — either way we spin it into your deck.">
+            {/* ── Preset AI lores ── */}
+            <LoreLibrary settingId={loreSetting} occasionId={loreOccasion} onPickSetting={pickSetting} onPickOccasion={pickOccasion} t={themeObj} />
+
+            <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "20px 0" }}>
+              <div style={{ flex: 1, height: 1, background: "#2c2c36" }} />
+              <span style={{ fontFamily: UI_FONT, fontSize: 12, letterSpacing: 1.5, textTransform: "uppercase", color: "#8a8a98" }}>or</span>
+              <div style={{ flex: 1, height: 1, background: "#2c2c36" }} />
+            </div>
+
+            {/* ── User-made lore ── */}
+            <div style={{ padding: 16, borderRadius: 12, border: `1px solid ${themeObj.accent}33`, background: "rgba(255,255,255,0.02)" }}>
+              <div style={{ fontFamily: themeObj.displayFont, fontWeight: 700, fontSize: 16, color: "#f4f4fa", marginBottom: 4 }}>🪶 Forge your own lore</div>
+              <div style={{ fontSize: 13, color: "#8a8a98", marginBottom: 14 }}>Write your quest from scratch (or tweak a template above), then pin down the specifics.</div>
+              <div style={{ fontFamily: UI_FONT, fontSize: 12, letterSpacing: 0.4, textTransform: "uppercase", color: "#8a8a98", marginBottom: 8 }}>Your quest</div>
+              <textarea value={questPrompt} onChange={(e) => setQuestPrompt(e.target.value)} rows={7}
+                placeholder="e.g. Dave's bachelor party in Lisbon — complete dares across the city to 'earn back' his freedom before the wedding. He fears seagulls and loves bad karaoke."
+                style={{ ...inputStyle, resize: "vertical", lineHeight: 1.5 }} />
+              <div style={{ fontSize: 12, color: "#7a7a88", marginTop: 8 }}>Tip: name the guest of honor, the place, and a couple personal details for sharper cards.</div>
+              <GuardrailBuilder guardrails={guardrails} onAdd={addGuardrail} onUpdate={updateGuardrail} onRemove={removeGuardrail} />
+            </div>
+
             <CardStylePicker themeId={theme || "lotr"} onPick={setTheme} />
-            <div style={{ fontFamily: UI_FONT, fontSize: 12, letterSpacing: 0.4, textTransform: "uppercase", color: "#8a8a98", marginBottom: 8 }}>Your quest</div>
-            <textarea value={questPrompt} onChange={(e) => setQuestPrompt(e.target.value)} rows={8}
-              placeholder="Write your own, or edit a template. e.g. Dave's bachelor party in Lisbon — complete dares across the city to 'earn back' his freedom before the wedding. He fears seagulls and loves bad karaoke."
-              style={{ ...inputStyle, resize: "vertical", lineHeight: 1.5 }} />
-            <div style={{ fontSize: 12, color: "#7a7a88", marginTop: 8 }}>Tip: name the guest of honor, the place, and a couple personal details for sharper cards.</div>
-            <GuardrailBuilder guardrails={guardrails} onAdd={addGuardrail} onUpdate={updateGuardrail} onRemove={removeGuardrail} />
             <NavRow onNext={() => setStep(1)} nextOk={canNext[0]} />
           </Panel>
         )}
