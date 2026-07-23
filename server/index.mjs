@@ -163,6 +163,115 @@ async function deckDelete(ctx, id) {
   return { ok: true };
 }
 
+// ---- Server-side decks: save / list / share / async collaboration ----------
+// A deck's `id` is its public share id (client-supplied UUID, unguessable).
+// `collab_token` is a separate secret that grants add/edit access via link.
+const randToken = () => crypto.randomBytes(12).toString("hex");
+const msOf = (ts) => new Date(ts).getTime();
+function deckIndexRow(d) {
+  return { id: d.id, name: d.name, theme: d.theme, eventType: d.event_type, count: d.card_count, updatedAt: msOf(d.updated_at), collabToken: d.collab_token || null, collabEnabled: !!d.collab_enabled };
+}
+
+async function sqSave({ ownerToken, deck }) {
+  requireDb();
+  if (!ownerToken) throw httpErr(400, "ownerToken required");
+  if (!deck || !deck.id) throw httpErr(400, "deck.id required");
+  const id = String(deck.id);
+  const existing = (await query("SELECT owner_token, collab_token FROM sq_decks WHERE id = $1", [id])).rows[0];
+  if (existing && existing.owner_token !== ownerToken) throw httpErr(403, "not your deck");
+  const collabToken = existing?.collab_token || randToken();
+  const cardCount = (deck.cards || []).length;
+  await query(
+    `INSERT INTO sq_decks (id, owner_token, collab_token, name, theme, event_type, card_count, payload, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8, now())
+     ON CONFLICT (id) DO UPDATE SET name=$4, theme=$5, event_type=$6, card_count=$7, payload=$8, updated_at=now()
+     WHERE sq_decks.owner_token = $2`,
+    [id, ownerToken, collabToken, deck.name || "Untitled deck", deck.theme || null, deck.eventType || null, cardCount, deck]
+  );
+  const row = (await query("SELECT updated_at FROM sq_decks WHERE id = $1", [id])).rows[0];
+  return { id, collabToken, updatedAt: row ? msOf(row.updated_at) : Date.now() };
+}
+
+async function sqList({ ownerToken }) {
+  requireDb();
+  if (!ownerToken) throw httpErr(400, "ownerToken required");
+  const r = await query("SELECT id, name, theme, event_type, card_count, updated_at, collab_token, collab_enabled FROM sq_decks WHERE owner_token = $1 ORDER BY updated_at DESC", [ownerToken]);
+  return { decks: r.rows.map(deckIndexRow) };
+}
+
+async function sqDelete({ id, ownerToken }) {
+  requireDb();
+  await query("DELETE FROM sq_decks WHERE id = $1 AND owner_token = $2", [id, ownerToken]);
+  return { ok: true };
+}
+
+// Public read by share id (view / clone).
+async function sqGet(id) {
+  requireDb();
+  const r = await query("SELECT id, name, payload, updated_at FROM sq_decks WHERE id = $1", [id]);
+  if (!r.rows.length) throw httpErr(404, "deck not found");
+  const d = r.rows[0];
+  return { id: d.id, name: d.name, updatedAt: msOf(d.updated_at), deck: d.payload };
+}
+
+// Owner enables collaboration and gets the collab link token.
+async function sqCollabEnable({ id, ownerToken }) {
+  requireDb();
+  const row = (await query("SELECT collab_token, owner_token FROM sq_decks WHERE id = $1", [id])).rows[0];
+  if (!row) throw httpErr(404, "deck not found");
+  if (row.owner_token !== ownerToken) throw httpErr(403, "not your deck");
+  const token = row.collab_token || randToken();
+  await query("UPDATE sq_decks SET collab_enabled = true, collab_token = $2 WHERE id = $1", [id, token]);
+  return { collabToken: token };
+}
+
+// Contributor reads a deck via the collab token.
+async function sqCollabGet(token) {
+  requireDb();
+  const d = (await query("SELECT id, name, payload, updated_at, collab_enabled FROM sq_decks WHERE collab_token = $1", [token])).rows[0];
+  if (!d || !d.collab_enabled) throw httpErr(404, "collab deck not found");
+  return { id: d.id, name: d.name, updatedAt: msOf(d.updated_at), deck: d.payload };
+}
+
+// Poll: did the deck change since a timestamp?
+async function sqCollabPoll(token, sinceMs) {
+  requireDb();
+  const d = (await query("SELECT updated_at, card_count FROM sq_decks WHERE collab_token = $1 AND collab_enabled = true", [token])).rows[0];
+  if (!d) throw httpErr(404, "collab deck not found");
+  const updatedAt = msOf(d.updated_at);
+  return { changed: updatedAt > (Number(sinceMs) || 0), updatedAt, count: d.card_count };
+}
+
+// Contributor adds/updates ONE card (merged into payload.cards by uid). Append-only for new uids.
+async function sqCollabUpsertCard({ token, card, byName, art }) {
+  requireDb();
+  if (!card || !card.uid) throw httpErr(400, "card.uid required");
+  const row = (await query("SELECT payload FROM sq_decks WHERE collab_token = $1 AND collab_enabled = true", [token])).rows[0];
+  if (!row) throw httpErr(404, "collab deck not found");
+  const payload = row.payload || {};
+  const cards = Array.isArray(payload.cards) ? payload.cards.slice() : [];
+  const idx = cards.findIndex((c) => c.uid === card.uid);
+  const merged = { ...(idx >= 0 ? cards[idx] : {}), ...card, addedBy: (idx >= 0 ? cards[idx].addedBy : null) || card.addedBy || byName || "Guest" };
+  if (idx >= 0) cards[idx] = merged; else cards.push(merged);
+  payload.cards = cards;
+  if (art && typeof art === "string") { payload.arts = payload.arts || {}; payload.arts[card.uid] = art; }
+  await query("UPDATE sq_decks SET payload = $2, card_count = $3, updated_at = now() WHERE collab_token = $1", [token, payload, cards.length]);
+  const upd = (await query("SELECT updated_at FROM sq_decks WHERE collab_token = $1", [token])).rows[0];
+  return { ok: true, updatedAt: msOf(upd.updated_at) };
+}
+
+// Contributor removes a card by uid.
+async function sqCollabRemoveCard({ token, uid }) {
+  requireDb();
+  const row = (await query("SELECT payload FROM sq_decks WHERE collab_token = $1 AND collab_enabled = true", [token])).rows[0];
+  if (!row) throw httpErr(404, "collab deck not found");
+  const payload = row.payload || {};
+  payload.cards = (payload.cards || []).filter((c) => c.uid !== uid);
+  if (payload.arts) delete payload.arts[uid];
+  await query("UPDATE sq_decks SET payload = $2, card_count = $3, updated_at = now() WHERE collab_token = $1", [token, payload, payload.cards.length]);
+  return { ok: true };
+}
+
 // ---- Anthropic (lore) -----------------------------------------------------
 
 async function callClaude(prompt, { json = false, maxTokens = 1200 } = {}) {
@@ -590,9 +699,25 @@ const server = http.createServer(async (req, res) => {
     const ctx = await resolveAuth(req);
     const body = req.method === "POST" ? await readBody(req) : {};
 
-    // /api/decks/:id — GET (open) / DELETE
+    const q = url.searchParams;
+    let result, m;
+    // Server-side deck storage + share + async collaboration.
+    if (p.startsWith("/api/sq/")) {
+      if (req.method === "POST" && p === "/api/sq/save") result = await sqSave(body);
+      else if (req.method === "GET" && p === "/api/sq/list") result = await sqList({ ownerToken: q.get("ownerToken") });
+      else if (req.method === "GET" && (m = p.match(/^\/api\/sq\/deck\/([^/]+)$/))) result = await sqGet(decodeURIComponent(m[1]));
+      else if (req.method === "DELETE" && (m = p.match(/^\/api\/sq\/deck\/([^/]+)$/))) result = await sqDelete({ id: decodeURIComponent(m[1]), ownerToken: q.get("ownerToken") });
+      else if (req.method === "POST" && (m = p.match(/^\/api\/sq\/deck\/([^/]+)\/collab$/))) result = await sqCollabEnable({ id: decodeURIComponent(m[1]), ownerToken: body.ownerToken });
+      else if (req.method === "GET" && (m = p.match(/^\/api\/sq\/collab\/([^/]+)\/poll$/))) result = await sqCollabPoll(decodeURIComponent(m[1]), q.get("since"));
+      else if (req.method === "POST" && (m = p.match(/^\/api\/sq\/collab\/([^/]+)\/card$/))) result = await sqCollabUpsertCard({ token: decodeURIComponent(m[1]), ...body });
+      else if (req.method === "POST" && (m = p.match(/^\/api\/sq\/collab\/([^/]+)\/remove$/))) result = await sqCollabRemoveCard({ token: decodeURIComponent(m[1]), uid: body.uid });
+      else if (req.method === "GET" && (m = p.match(/^\/api\/sq\/collab\/([^/]+)$/))) result = await sqCollabGet(decodeURIComponent(m[1]));
+      else { send(res, 404, { error: "not_found" }, origin); return; }
+      send(res, 200, result, origin);
+      return;
+    }
+    // /api/decks/:id — GET (open) / DELETE  (legacy account-based)
     const deckMatch = p.match(/^\/api\/decks\/([^/]+)$/);
-    let result;
     if (deckMatch) {
       const id = decodeURIComponent(deckMatch[1]);
       if (req.method === "GET") result = await deckGet(ctx, id);

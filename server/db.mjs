@@ -67,6 +67,24 @@ export async function migrate() {
       updated_at timestamptz DEFAULT now()
     );
     CREATE INDEX IF NOT EXISTS decks_user_idx ON decks(user_id);
+    -- Server-side decks with share + async-collaboration support. The row id
+    -- doubles as the public share id; collab_token grants edit access via link.
+    CREATE TABLE IF NOT EXISTS sq_decks (
+      id text PRIMARY KEY,
+      owner_token text NOT NULL,
+      user_id text REFERENCES users(id) ON DELETE SET NULL,
+      collab_token text UNIQUE,
+      collab_enabled boolean DEFAULT false,
+      name text,
+      theme text,
+      event_type text,
+      card_count int DEFAULT 0,
+      payload jsonb NOT NULL,
+      created_at timestamptz DEFAULT now(),
+      updated_at timestamptz DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS sq_decks_owner_idx ON sq_decks(owner_token);
+    CREATE INDEX IF NOT EXISTS sq_decks_collab_idx ON sq_decks(collab_token);
     CREATE TABLE IF NOT EXISTS orders (
       id text PRIMARY KEY,
       user_id text,
@@ -80,4 +98,8 @@ export async function migrate() {
       updated_at timestamptz DEFAULT now()
     );
   `);
+  // Additive prep for OAuth accounts (safe to run repeatedly).
+  await query(`ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL`).catch(() => {});
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS google_sub text`).catch(() => {});
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url text`).catch(() => {});
 }
