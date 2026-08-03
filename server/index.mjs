@@ -46,6 +46,19 @@ const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-5";
 // to upgrade (e.g. for a premium tier), or gemini-3.1-flash-lite-image for cheapest.
 const GEMINI_IMAGE_MODEL = process.env.GEMINI_IMAGE_MODEL || "gemini-3.1-flash-image";
 
+// Cards are portrait; without this Gemini returns landscape (1408x768) and the
+// card crops it with object-fit: cover, discarding ~45% of the pixels we paid
+// for and off-centering the subject.
+const ART_ASPECT = process.env.ART_ASPECT || "3:4";
+// Gemini hands back a ~900KB maximum-quality JPEG. That art is stored inline in
+// the deck payload, so its size is the deck's size. Re-encoding costs ~5x less
+// at visually indistinguishable quality. Resolution is deliberately preserved:
+// a printed 2.5x3.5in card at 300dpi needs ~750x1050, so downscaling for screen
+// would quietly ruin the print path. mozjpeg matches webp's ratio here without
+// the format-support risk, so it stays the default.
+const ART_FORMAT = (process.env.ART_FORMAT || "jpeg").toLowerCase(); // jpeg | webp | off
+const ART_QUALITY = Number(process.env.ART_QUALITY || 82);
+
 // --- Abuse / cost controls (these endpoints spend real money) --------------
 // ALLOW_ORIGIN: comma-separated allowlist, or "*". A browser request whose
 // Origin isn't listed gets no CORS header and is blocked by the browser.
@@ -322,6 +335,29 @@ function styleBrief(t) {
   }[t] || "cinematic painterly portrait";
 }
 
+// Re-encode generated art down to a sane size to store. `sharp` is imported
+// lazily and treated as optional — the same pattern db.mjs uses for `pg` — so a
+// checkout without it still boots and serves, just with the original oversized
+// image. Returns null whenever the original should be kept as-is.
+async function shrinkArt(raw) {
+  if (ART_FORMAT === "off") return null;
+  let sharp;
+  try { ({ default: sharp } = await import("sharp")); }
+  catch { return null; } // not installed — not an error, just no re-encoding
+  try {
+    const img = sharp(raw);
+    const out = ART_FORMAT === "webp"
+      ? await img.webp({ quality: ART_QUALITY }).toBuffer()
+      : await img.jpeg({ quality: ART_QUALITY, mozjpeg: true }).toBuffer();
+    // A re-encode that grew the file is not worth taking.
+    if (out.length >= raw.length) return null;
+    return { buf: out, mime: ART_FORMAT === "webp" ? "image/webp" : "image/jpeg" };
+  } catch (e) {
+    console.warn("art re-encode failed, keeping original:", e.message);
+    return null;
+  }
+}
+
 // Turn an upstream Gemini failure into a message that names what to fix. The
 // two 429s look identical but mean opposite things: `limit: 0` is "this model
 // has no free-tier allocation, the project needs billing", NOT "slow down".
@@ -352,7 +388,10 @@ async function callGeminiImage(parts) {
   const res = await fetchWithTimeout(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ contents: [{ parts }] }),
+    body: JSON.stringify({
+      contents: [{ parts }],
+      generationConfig: { imageConfig: { aspectRatio: ART_ASPECT } },
+    }),
   }, IMAGE_TIMEOUT_MS);
   if (!res.ok) {
     let detail = await res.text().catch(() => "");
@@ -370,7 +409,11 @@ async function callGeminiImage(parts) {
   const inline = img?.inline_data || img?.inlineData;
   if (!inline?.data) throw new Error("Art service returned no image (content may have been declined)");
   const outMime = inline.mime_type || inline.mimeType || "image/png";
-  return `data:${outMime};base64,${inline.data}`;
+  const raw = Buffer.from(inline.data, "base64");
+  const small = await shrinkArt(raw);
+  if (!small) return `data:${outMime};base64,${inline.data}`;
+  console.log(`art re-encoded: ${(raw.length / 1024).toFixed(0)}KB -> ${(small.buf.length / 1024).toFixed(0)}KB ${small.mime}`);
+  return `data:${small.mime};base64,${small.buf.toString("base64")}`;
 }
 
 // Character portrait from a real face (photoDataUrl: "data:image/jpeg;base64,…").
@@ -629,15 +672,30 @@ function overDailyCap() {
 function readBody(req, limitBytes = 25 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     let size = 0;
+    let over = false;
     const chunks = [];
     req.on("data", (c) => {
+      if (over) return; // already rejected — drain the rest and discard it
       size += c.length;
-      if (size > limitBytes) { reject(new Error("payload too large")); req.destroy(); return; }
+      // 413, not a bare 500: this is reachable in normal use, because card art
+      // is stored inline in the deck payload (~180KB/card after re-encoding,
+      // ~1.2MB before). The client shows this message, so it says what to do.
+      //
+      // Deliberately NOT destroying the socket here. Doing so races the error
+      // response and the client sees a dropped connection instead of the 413
+      // that explains the problem. Dropping chunks bounds memory just as well.
+      if (size > limitBytes) {
+        over = true;
+        chunks.length = 0;
+        reject(httpErr(413, `Deck is too large to save (over ${Math.round(limitBytes / 1024 / 1024)}MB). Try removing a few cards.`));
+        return;
+      }
       chunks.push(c);
     });
     req.on("end", () => {
+      if (over) return; // already rejected with a 413
       try { resolve(chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {}); }
-      catch (e) { reject(new Error("invalid JSON body")); }
+      catch (e) { reject(httpErr(400, "invalid JSON body")); }
     });
     req.on("error", reject);
   });

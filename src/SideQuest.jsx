@@ -1419,7 +1419,13 @@ export default function SideQuest() {
           setCurrentDeckId(r.id);
           if (r.collabToken) setCollabToken(r.collabToken);
           refreshDecks();
-        } catch (e) { console.warn("autosave failed", e.message); }
+        } catch (e) {
+          // Autosave is the only save most users ever trigger, so swallowing
+          // this lost their deck silently — an oversized payload looked
+          // identical to a successful save.
+          console.warn("autosave failed", e.message);
+          setError(`Deck not saved: ${e.message}`);
+        }
       })();
       return curArts; // no change to arts
     });
