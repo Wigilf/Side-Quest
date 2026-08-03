@@ -46,6 +46,19 @@ const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-5";
 // to upgrade (e.g. for a premium tier), or gemini-3.1-flash-lite-image for cheapest.
 const GEMINI_IMAGE_MODEL = process.env.GEMINI_IMAGE_MODEL || "gemini-3.1-flash-image";
 
+// Cards are portrait; without this Gemini returns landscape (1408x768) and the
+// card crops it with object-fit: cover, discarding ~45% of the pixels we paid
+// for and off-centering the subject.
+const ART_ASPECT = process.env.ART_ASPECT || "3:4";
+// Gemini hands back a ~900KB maximum-quality JPEG. That art is stored inline in
+// the deck payload, so its size is the deck's size. Re-encoding costs ~5x less
+// at visually indistinguishable quality. Resolution is deliberately preserved:
+// a printed 2.5x3.5in card at 300dpi needs ~750x1050, so downscaling for screen
+// would quietly ruin the print path. mozjpeg matches webp's ratio here without
+// the format-support risk, so it stays the default.
+const ART_FORMAT = (process.env.ART_FORMAT || "jpeg").toLowerCase(); // jpeg | webp | off
+const ART_QUALITY = Number(process.env.ART_QUALITY || 82);
+
 // --- Abuse / cost controls (these endpoints spend real money) --------------
 // ALLOW_ORIGIN: comma-separated allowlist, or "*". A browser request whose
 // Origin isn't listed gets no CORS header and is blocked by the browser.
@@ -60,6 +73,9 @@ const RATE_WINDOW_MS = Number(process.env.RATE_WINDOW_MS || 60_000);
 const MAX_GENERATIONS_PER_DAY = Number(process.env.MAX_GENERATIONS_PER_DAY || 500);
 // Abort upstream calls that hang.
 const UPSTREAM_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS || 60_000);
+// Image generation is much slower than text — observed 14s on a warm path, but
+// variable enough that a 60s budget aborts calls that would have succeeded.
+const IMAGE_TIMEOUT_MS = Number(process.env.IMAGE_TIMEOUT_MS || 120_000);
 
 async function fetchWithTimeout(url, opts = {}, ms = UPSTREAM_TIMEOUT_MS) {
   const ctrl = new AbortController();
@@ -319,6 +335,48 @@ function styleBrief(t) {
   }[t] || "cinematic painterly portrait";
 }
 
+// Re-encode generated art down to a sane size to store. `sharp` is imported
+// lazily and treated as optional — the same pattern db.mjs uses for `pg` — so a
+// checkout without it still boots and serves, just with the original oversized
+// image. Returns null whenever the original should be kept as-is.
+async function shrinkArt(raw) {
+  if (ART_FORMAT === "off") return null;
+  let sharp;
+  try { ({ default: sharp } = await import("sharp")); }
+  catch { return null; } // not installed — not an error, just no re-encoding
+  try {
+    const img = sharp(raw);
+    const out = ART_FORMAT === "webp"
+      ? await img.webp({ quality: ART_QUALITY }).toBuffer()
+      : await img.jpeg({ quality: ART_QUALITY, mozjpeg: true }).toBuffer();
+    // A re-encode that grew the file is not worth taking.
+    if (out.length >= raw.length) return null;
+    return { buf: out, mime: ART_FORMAT === "webp" ? "image/webp" : "image/jpeg" };
+  } catch (e) {
+    console.warn("art re-encode failed, keeping original:", e.message);
+    return null;
+  }
+}
+
+// Turn an upstream Gemini failure into a message that names what to fix. The
+// two 429s look identical but mean opposite things: `limit: 0` is "this model
+// has no free-tier allocation, the project needs billing", NOT "slow down".
+function artUpstreamErr(status, upstream) {
+  let msg;
+  if (status === 429 && /limit:\s*0/.test(upstream)) {
+    msg = `Art model ${GEMINI_IMAGE_MODEL} has no quota on this Google API key — ` +
+      `it has no free tier, so the key's project needs billing enabled.`;
+  } else if (status === 429) {
+    msg = "Art service is rate-limited right now — retry in a few seconds.";
+  } else if (status === 401 || status === 403) {
+    msg = "Art service rejected the Google API key (invalid, or lacking permission for this model).";
+  } else {
+    msg = `Art service error (${status})`;
+  }
+  if (upstream) msg += ` [upstream: ${upstream.slice(0, 200)}]`;
+  return httpErr(status === 429 ? 429 : 502, msg);
+}
+
 // Shared Gemini image call. `parts` is the generateContent parts array (a text
 // part, optionally preceded by an inline_data image). Returns a data URL.
 async function callGeminiImage(parts) {
@@ -330,12 +388,20 @@ async function callGeminiImage(parts) {
   const res = await fetchWithTimeout(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ contents: [{ parts }] }),
-  });
+    body: JSON.stringify({
+      contents: [{ parts }],
+      generationConfig: { imageConfig: { aspectRatio: ART_ASPECT } },
+    }),
+  }, IMAGE_TIMEOUT_MS);
   if (!res.ok) {
-    const detail = await res.text().catch(() => "");
-    console.error("art upstream error", res.status, detail.slice(0, 300));
-    throw new Error(`Art service error (${res.status})`);
+    let detail = await res.text().catch(() => "");
+    // The key rides in the query string; make sure it can't ride back out in an
+    // error body that we now forward to the browser.
+    if (key) detail = detail.split(key).join("[redacted]");
+    console.error("art upstream error", res.status, detail.slice(0, 500));
+    let upstream = "";
+    try { upstream = JSON.parse(detail)?.error?.message || ""; } catch { /* not JSON */ }
+    throw artUpstreamErr(res.status, upstream);
   }
   const body = await res.json();
   const outParts = body?.candidates?.[0]?.content?.parts || [];
@@ -343,7 +409,11 @@ async function callGeminiImage(parts) {
   const inline = img?.inline_data || img?.inlineData;
   if (!inline?.data) throw new Error("Art service returned no image (content may have been declined)");
   const outMime = inline.mime_type || inline.mimeType || "image/png";
-  return `data:${outMime};base64,${inline.data}`;
+  const raw = Buffer.from(inline.data, "base64");
+  const small = await shrinkArt(raw);
+  if (!small) return `data:${outMime};base64,${inline.data}`;
+  console.log(`art re-encoded: ${(raw.length / 1024).toFixed(0)}KB -> ${(small.buf.length / 1024).toFixed(0)}KB ${small.mime}`);
+  return `data:${small.mime};base64,${small.buf.toString("base64")}`;
 }
 
 // Character portrait from a real face (photoDataUrl: "data:image/jpeg;base64,…").
@@ -602,15 +672,30 @@ function overDailyCap() {
 function readBody(req, limitBytes = 25 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     let size = 0;
+    let over = false;
     const chunks = [];
     req.on("data", (c) => {
+      if (over) return; // already rejected — drain the rest and discard it
       size += c.length;
-      if (size > limitBytes) { reject(new Error("payload too large")); req.destroy(); return; }
+      // 413, not a bare 500: this is reachable in normal use, because card art
+      // is stored inline in the deck payload (~180KB/card after re-encoding,
+      // ~1.2MB before). The client shows this message, so it says what to do.
+      //
+      // Deliberately NOT destroying the socket here. Doing so races the error
+      // response and the client sees a dropped connection instead of the 413
+      // that explains the problem. Dropping chunks bounds memory just as well.
+      if (size > limitBytes) {
+        over = true;
+        chunks.length = 0;
+        reject(httpErr(413, `Deck is too large to save (over ${Math.round(limitBytes / 1024 / 1024)}MB). Try removing a few cards.`));
+        return;
+      }
       chunks.push(c);
     });
     req.on("end", () => {
+      if (over) return; // already rejected with a 413
       try { resolve(chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {}); }
-      catch (e) { reject(new Error("invalid JSON body")); }
+      catch (e) { reject(httpErr(400, "invalid JSON body")); }
     });
     req.on("error", reject);
   });
