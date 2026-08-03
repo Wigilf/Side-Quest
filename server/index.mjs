@@ -60,6 +60,9 @@ const RATE_WINDOW_MS = Number(process.env.RATE_WINDOW_MS || 60_000);
 const MAX_GENERATIONS_PER_DAY = Number(process.env.MAX_GENERATIONS_PER_DAY || 500);
 // Abort upstream calls that hang.
 const UPSTREAM_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS || 60_000);
+// Image generation is much slower than text — observed 14s on a warm path, but
+// variable enough that a 60s budget aborts calls that would have succeeded.
+const IMAGE_TIMEOUT_MS = Number(process.env.IMAGE_TIMEOUT_MS || 120_000);
 
 async function fetchWithTimeout(url, opts = {}, ms = UPSTREAM_TIMEOUT_MS) {
   const ctrl = new AbortController();
@@ -319,6 +322,25 @@ function styleBrief(t) {
   }[t] || "cinematic painterly portrait";
 }
 
+// Turn an upstream Gemini failure into a message that names what to fix. The
+// two 429s look identical but mean opposite things: `limit: 0` is "this model
+// has no free-tier allocation, the project needs billing", NOT "slow down".
+function artUpstreamErr(status, upstream) {
+  let msg;
+  if (status === 429 && /limit:\s*0/.test(upstream)) {
+    msg = `Art model ${GEMINI_IMAGE_MODEL} has no quota on this Google API key — ` +
+      `it has no free tier, so the key's project needs billing enabled.`;
+  } else if (status === 429) {
+    msg = "Art service is rate-limited right now — retry in a few seconds.";
+  } else if (status === 401 || status === 403) {
+    msg = "Art service rejected the Google API key (invalid, or lacking permission for this model).";
+  } else {
+    msg = `Art service error (${status})`;
+  }
+  if (upstream) msg += ` [upstream: ${upstream.slice(0, 200)}]`;
+  return httpErr(status === 429 ? 429 : 502, msg);
+}
+
 // Shared Gemini image call. `parts` is the generateContent parts array (a text
 // part, optionally preceded by an inline_data image). Returns a data URL.
 async function callGeminiImage(parts) {
@@ -331,11 +353,16 @@ async function callGeminiImage(parts) {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ contents: [{ parts }] }),
-  });
+  }, IMAGE_TIMEOUT_MS);
   if (!res.ok) {
-    const detail = await res.text().catch(() => "");
-    console.error("art upstream error", res.status, detail.slice(0, 300));
-    throw new Error(`Art service error (${res.status})`);
+    let detail = await res.text().catch(() => "");
+    // The key rides in the query string; make sure it can't ride back out in an
+    // error body that we now forward to the browser.
+    if (key) detail = detail.split(key).join("[redacted]");
+    console.error("art upstream error", res.status, detail.slice(0, 500));
+    let upstream = "";
+    try { upstream = JSON.parse(detail)?.error?.message || ""; } catch { /* not JSON */ }
+    throw artUpstreamErr(res.status, upstream);
   }
   const body = await res.json();
   const outParts = body?.candidates?.[0]?.content?.parts || [];

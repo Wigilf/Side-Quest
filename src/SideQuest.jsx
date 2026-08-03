@@ -402,7 +402,10 @@ async function regenerateOneCard({ eventType, theme, questPrompt, card }) {
 // ("nano-banana") to turn the real face into a themed character portrait.
 // Otherwise we return a procedural themed backdrop and the card layers the raw
 // photo on top (see GameCard) — no Google key ever touches the browser.
-async function generateCardArt({ photoBase64, frameAccent, themeStyle, seedStr, lore, refineNote, objectMode, category }) {
+// onFallback(message) fires when the backend art call failed and we're returning
+// a procedural backdrop instead — without it a broken key or an exhausted quota
+// looks identical to "the art just renders like that", which hid a real outage.
+async function generateCardArt({ photoBase64, frameAccent, themeStyle, seedStr, lore, refineNote, objectMode, category, onFallback }) {
   // Portrait mode needs a face photo; object mode (artifacts/spells/NPCs/…) is
   // text-to-image and needs no photo. Either way, call the backend when live.
   if (API_BASE && (photoBase64 || objectMode)) {
@@ -418,6 +421,7 @@ async function generateCardArt({ photoBase64, frameAccent, themeStyle, seedStr, 
       throw new Error("no image");
     } catch (e) {
       console.warn("Backend art failed, using procedural backdrop:", e.message);
+      if (onFallback) onFallback(e.message);
     }
   }
   await new Promise((r) => setTimeout(r, 300 + Math.random() * 400));
@@ -1388,7 +1392,7 @@ export default function SideQuest() {
           const frAccent = (CARD_FRAMES.find((f) => f.key === c.frame) || CARD_FRAMES[0]).accent;
           // With a backend + photo -> real face->character art; otherwise a themed
           // backdrop the card layers the raw photo over.
-          const art = await generateCardArt({ photoBase64: part?.photo || null, frameAccent: frAccent, themeStyle: th.style, seedStr: c.realName + c.title, lore: c, objectMode: !c.pid && !!c.category, category: c.category });
+          const art = await generateCardArt({ photoBase64: part?.photo || null, frameAccent: frAccent, themeStyle: th.style, seedStr: c.realName + c.title, lore: c, objectMode: !c.pid && !!c.category, category: c.category, onFallback: (m) => setError(`Card art fell back to a placeholder: ${m}`) });
           setArts((s) => ({ ...s, [c.uid]: art }));
         } finally {
           setLoadingArt((s) => ({ ...s, [c.uid]: false }));
@@ -1486,7 +1490,7 @@ export default function SideQuest() {
       const card = cards.find((c) => c.uid === uid);
       const part = participants.find((p) => p.id === card.pid);
       const frAccent = (CARD_FRAMES.find((f) => f.key === card.frame) || CARD_FRAMES[0]).accent;
-      const art = await generateCardArt({ photoBase64: part?.photo || null, frameAccent: frAccent, themeStyle: themeObj.style, seedStr: card.realName + card.title + Math.random(), lore: card, refineNote, objectMode: !card.pid && !!card.category, category: card.category });
+      const art = await generateCardArt({ photoBase64: part?.photo || null, frameAccent: frAccent, themeStyle: themeObj.style, seedStr: card.realName + card.title + Math.random(), lore: card, refineNote, objectMode: !card.pid && !!card.category, category: card.category, onFallback: (m) => setError(`Card art fell back to a placeholder: ${m}`) });
       setArts((s) => ({ ...s, [uid]: art }));
     } catch (e) { setError(e.message); } finally { setLoadingArt((s) => ({ ...s, [uid]: false })); setBusyCard(null); }
   }
