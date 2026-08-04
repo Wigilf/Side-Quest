@@ -1510,36 +1510,15 @@ export default function SideQuest() {
   // ===== LANDING =====
   if (landing) {
     return (
-      <div style={{ minHeight: "100vh", background: "radial-gradient(1200px 700px at 50% -5%, #2a1d3f 0%, #15121d 45%, #08070d 100%)", color: "#e8e8f0", fontFamily: UI_FONT, position: "relative", overflow: "hidden" }}>
-        <GlobalCSS />
-        {checkoutReturn && <CheckoutBanner status={checkoutReturn} onClose={() => setCheckoutReturn(null)} />}
-        <FloatingCards />
-        <div style={{ position: "relative", zIndex: 2, maxWidth: 820, margin: "0 auto", padding: "120px 24px 80px", textAlign: "center" }}>
-          <div className="ql-fade" style={{ fontFamily: DISPLAY_FONT, fontSize: 13, letterSpacing: 8, textTransform: "uppercase", color: "#d8b24a", marginBottom: 18 }}>✦ Side Quest ✦</div>
-          <h1 className="ql-fade" style={{ fontFamily: DISPLAY_FONT, fontWeight: 700, fontSize: "clamp(36px, 7vw, 72px)", lineHeight: 1.05, margin: "0 0 22px", background: "linear-gradient(180deg,#fff,#cda955)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", animationDelay: ".1s" }}>
-            Every event<br />deserves a deck.
-          </h1>
-          <p className="ql-fade" style={{ color: "#b8b8c8", fontSize: "clamp(16px,2.4vw,20px)", maxWidth: 560, margin: "0 auto 38px", lineHeight: 1.6, animationDelay: ".2s" }}>
-            Side Quest turns any bachelor party, trip, or night out into a playable card game — starring your actual crew. AI writes the lore, paints the portraits, and we ship the real, physical deck.
-          </p>
-          <div className="ql-fade" style={{ display: "flex", flexDirection: "column", gap: 14, alignItems: "center", animationDelay: ".3s" }}>
-            <PrimaryButton onClick={() => setLanding(false)} style={{ fontSize: 18, padding: "18px 44px" }}>Build your deck →</PrimaryButton>
-            <button onClick={loadDemo} style={{ background: "none", border: "none", cursor: "pointer", color: "#6c6c7c", fontFamily: UI_FONT, fontSize: 13, textDecoration: "underline", textUnderlineOffset: 3, opacity: 0.8 }}>
-              or skip to a sample deck
-            </button>
-            {savedDecks.length > 0 && (
-              <button onClick={() => { setShowDecks(true); setLanding(false); }} style={{ background: "none", border: "none", cursor: "pointer", color: "#d8b24a", fontFamily: UI_FONT, fontSize: 14, marginTop: 4 }}>
-                ◈ My decks ({savedDecks.length})
-              </button>
-            )}
-          </div>
-          <div className="ql-fade" style={{ marginTop: 56, display: "flex", gap: 30, justifyContent: "center", flexWrap: "wrap", color: "#7a7a88", fontSize: 13, animationDelay: ".4s" }}>
-            {["Born at a real bachelor party", "AI-written lore", "AI-painted portraits", "Shipped to your door"].map((x) => (
-              <span key={x} style={{ display: "flex", alignItems: "center", gap: 7 }}><span style={{ color: "#d8b24a" }}>◆</span>{x}</span>
-            ))}
-          </div>
-        </div>
-      </div>
+      <Landing
+        // The landing scrolls, the app does not reset it — without this you
+        // enter the builder already halfway down the page.
+        onOpen={() => { setLanding(false); window.scrollTo(0, 0); }}
+        onDemo={() => { loadDemo(); window.scrollTo(0, 0); }}
+        savedCount={savedDecks.length}
+        onDecks={() => { setShowDecks(true); setLanding(false); window.scrollTo(0, 0); }}
+        banner={checkoutReturn && <CheckoutBanner status={checkoutReturn} onClose={() => setCheckoutReturn(null)} />}
+      />
     );
   }
 
@@ -1837,10 +1816,166 @@ function DecksModal({ decks, onClose, onOpen, onDelete, onNew }) {
 }
 
 // ---------------------------------------------------------------------------
+// LANDING PAGE
+// ---------------------------------------------------------------------------
+// Explains the product to someone who has never seen it. The builder itself is
+// one click away at all times via the header button, which stays pinned while
+// the page scrolls — nobody should have to hunt for the way in.
+
+const HOW_IT_WORKS = [
+  { n: "01", t: "Set the scene", d: "Pick the occasion and the world it happens in — 19 occasion presets, 18 worlds from High Fantasy to Noir Detective — or write your own lore from scratch." },
+  { n: "02", t: "Cast your crew", d: "Add everyone coming. Names, a photo, and the inside jokes that only your group would get. That detail is what the writing hangs on." },
+  { n: "03", t: "Build the deck", d: "Beyond the heroes, add NPCs, artifacts, spells, locations and creatures. Every card starts from a template and stays fully editable." },
+  { n: "04", t: "Watch it come alive", d: "The lore gets written for your actual people, and each card is painted as an original illustration. Don't like one? Regenerate just that card." },
+  { n: "05", t: "Get the real thing", d: "Order the physical deck, printed and shipped to your door — or keep it digital and share the link." },
+];
+
+const FEATURES = [
+  { i: "✎", t: "Written for your crew", d: "Not filler text with names swapped in. The quests reference your occasion, your destination, and the jokes you fed it." },
+  { i: "◈", t: "Your friends, in character", d: "Upload a face and it comes back reimagined in-world — in costume, in the style of the deck, still recognizably them." },
+  { i: "❖", t: "Six card styles", d: "Galactic Saga, Realm of Rings, School of Spells, Grand Voyage, Neon Districts, Smoke & Shadows. Frames, fonts and palette all follow." },
+  { i: "⟳", t: "Nothing is locked", d: "Rewrite any card, repaint any portrait, nudge the art direction with a note. Change the card back while you're at it." },
+  { i: "↗", t: "Share a link", d: "Send the finished deck to anyone. No account needed to look at it." },
+  { i: "⚇", t: "Build it together", d: "Turn on collaboration and your friends add their own cards from their own devices. Their additions merge in without clobbering yours." },
+];
+
+function LandingSection({ eyebrow, title, sub, children, style }) {
+  return (
+    <section style={{ maxWidth: 1040, margin: "0 auto", padding: "0 24px 96px", ...style }}>
+      {eyebrow && <div style={{ fontFamily: UI_FONT, fontSize: 12, letterSpacing: 3, textTransform: "uppercase", color: "#d8b24a", marginBottom: 12 }}>{eyebrow}</div>}
+      <h2 style={{ fontFamily: DISPLAY_FONT, fontSize: "clamp(26px,4vw,40px)", margin: "0 0 12px", color: "#f0f0f6" }}>{title}</h2>
+      {sub && <p style={{ color: "#9a9aa8", fontSize: 16, lineHeight: 1.6, margin: "0 0 40px", maxWidth: 620 }}>{sub}</p>}
+      {children}
+    </section>
+  );
+}
+
+function Landing({ onOpen, onDemo, savedCount, onDecks, banner }) {
+  return (
+    <div style={{ minHeight: "100vh", background: "radial-gradient(1200px 700px at 50% -5%, #2a1d3f 0%, #15121d 45%, #08070d 100%)", color: "#e8e8f0", fontFamily: UI_FONT }}>
+      <GlobalCSS />
+      {banner}
+
+      {/* Pinned header — the way into the app, always reachable. */}
+      <header style={{ position: "sticky", top: 0, zIndex: 10, backdropFilter: "blur(10px)", background: "rgba(8,7,13,0.72)", borderBottom: "1px solid rgba(216,178,74,0.14)" }}>
+        {/* flexWrap + shrinking wordmark: on a narrow phone the wordmark and
+            both buttons don't fit on one line, and the page must never scroll
+            sideways — so the buttons drop to a second row instead. */}
+        <div style={{ maxWidth: 1040, margin: "0 auto", padding: "14px 24px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+          <div style={{ fontFamily: DISPLAY_FONT, fontSize: "clamp(11px,3vw,14px)", letterSpacing: "clamp(2px,1vw,5px)", textTransform: "uppercase", color: "#d8b24a", whiteSpace: "nowrap", minWidth: 0 }}>✦ Side Quest</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", minWidth: 0 }}>
+            {savedCount > 0 && (
+              <button onClick={onDecks} style={{ ...navBtn, whiteSpace: "nowrap" }}>◈ My decks ({savedCount})</button>
+            )}
+            <PrimaryButton onClick={onOpen} style={{ whiteSpace: "nowrap" }}>Open the app →</PrimaryButton>
+          </div>
+        </div>
+      </header>
+
+      {/* Hero */}
+      <div style={{ position: "relative", overflow: "hidden" }}>
+        <FloatingCards />
+        <div style={{ position: "relative", zIndex: 2, maxWidth: 820, margin: "0 auto", padding: "104px 24px 96px", textAlign: "center" }}>
+          <div className="ql-fade" style={{ fontFamily: DISPLAY_FONT, fontSize: 13, letterSpacing: 8, textTransform: "uppercase", color: "#d8b24a", marginBottom: 18 }}>✦ Side Quest ✦</div>
+          <h1 className="ql-fade" style={{ fontFamily: DISPLAY_FONT, fontWeight: 700, fontSize: "clamp(36px, 7vw, 72px)", lineHeight: 1.05, margin: "0 0 22px", background: "linear-gradient(180deg,#fff,#cda955)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", animationDelay: ".1s" }}>
+            Every event<br />deserves a deck.
+          </h1>
+          <p className="ql-fade" style={{ color: "#b8b8c8", fontSize: "clamp(16px,2.4vw,20px)", maxWidth: 580, margin: "0 auto 34px", lineHeight: 1.6, animationDelay: ".2s" }}>
+            Side Quest turns any bachelor party, trip, or night out into a playable card game — starring your actual crew. It writes the lore, paints the portraits, and ships you the real, physical deck.
+          </p>
+          <div className="ql-fade" style={{ display: "flex", gap: 12, justifyContent: "center", flexWrap: "wrap", animationDelay: ".3s" }}>
+            <PrimaryButton onClick={onOpen} style={{ fontSize: 17, padding: "16px 38px" }}>Build your deck →</PrimaryButton>
+            <GhostButton onClick={onDemo} style={{ padding: "16px 26px" }}>See a sample deck</GhostButton>
+          </div>
+          <div className="ql-fade" style={{ marginTop: 52, display: "flex", gap: 30, justifyContent: "center", flexWrap: "wrap", color: "#7a7a88", fontSize: 13, animationDelay: ".4s" }}>
+            {["Born at a real bachelor party", "Written for your group", "Original card art", "Shipped to your door"].map((x) => (
+              <span key={x} style={{ display: "flex", alignItems: "center", gap: 7 }}><span style={{ color: "#d8b24a" }}>◆</span>{x}</span>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* What it actually is */}
+      <LandingSection eyebrow="The idea" title="A card game where the heroes are your friends"
+        sub="You know the group. Side Quest knows how to turn them into a deck. Describe the occasion, add the people, and you get a full set of cards — each one a character, artifact, or quest written specifically for the trip you're actually taking.">
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(240px,1fr))", gap: 18 }}>
+          {FEATURES.map((f) => (
+            <div key={f.t} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid #2c2c36", borderRadius: 16, padding: "22px 22px 20px" }}>
+              <div style={{ color: "#d8b24a", fontSize: 20, marginBottom: 10 }}>{f.i}</div>
+              <div style={{ fontFamily: DISPLAY_FONT, fontSize: 18, marginBottom: 8, color: "#f0f0f6" }}>{f.t}</div>
+              <div style={{ color: "#9a9aa8", fontSize: 14, lineHeight: 1.6 }}>{f.d}</div>
+            </div>
+          ))}
+        </div>
+      </LandingSection>
+
+      {/* How it works */}
+      <LandingSection eyebrow="How it works" title="Five steps, about ten minutes"
+        sub="No rules to learn and nothing to install. You answer a few questions and the deck assembles itself — then you edit anything you want changed.">
+        <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+          {HOW_IT_WORKS.map((s) => (
+            <div key={s.n} style={{ display: "flex", gap: 22, alignItems: "flex-start", padding: "22px 0", borderTop: "1px solid #24242e" }}>
+              <div style={{ fontFamily: DISPLAY_FONT, fontSize: 22, color: "#d8b24a", minWidth: 44, opacity: 0.85 }}>{s.n}</div>
+              <div>
+                <div style={{ fontFamily: DISPLAY_FONT, fontSize: 20, marginBottom: 6, color: "#f0f0f6" }}>{s.t}</div>
+                <div style={{ color: "#9a9aa8", fontSize: 15, lineHeight: 1.65, maxWidth: 620 }}>{s.d}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </LandingSection>
+
+      {/* Worlds */}
+      <LandingSection eyebrow="Pick a world" title="Eighteen settings, or invent your own"
+        sub="Each one comes with its own tone, vocabulary and quest logic — so a pirate deck reads nothing like a noir deck. Or ignore all of them and write the lore yourself.">
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 9 }}>
+          {SETTING_LORES.map((s) => (
+            <span key={s.id} style={{ display: "inline-flex", alignItems: "center", gap: 7, padding: "9px 15px", borderRadius: 999, border: "1px solid #33333e", background: "rgba(255,255,255,0.03)", color: "#cfcfda", fontSize: 14 }}>
+              <span>{s.icon}</span>{s.name}
+            </span>
+          ))}
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 7, padding: "9px 15px", borderRadius: 999, border: "1px dashed #d8b24a66", color: "#d8b24a", fontSize: 14 }}>✎ Forge your own lore</span>
+        </div>
+      </LandingSection>
+
+      {/* Price + close */}
+      <LandingSection title="Take it to the table" style={{ paddingBottom: 40 }}
+        sub="Building and sharing a deck is free. When you want it in your hands, we print it and ship it.">
+        <div style={{ display: "flex", gap: 20, flexWrap: "wrap", alignItems: "stretch" }}>
+          <div style={{ flex: "1 1 260px", background: "rgba(255,255,255,0.025)", border: "1px solid #2c2c36", borderRadius: 16, padding: 26 }}>
+            <div style={{ fontFamily: DISPLAY_FONT, fontSize: 20, marginBottom: 8 }}>Build it</div>
+            <div style={{ fontFamily: DISPLAY_FONT, fontSize: 32, color: "#f3cf5b", marginBottom: 12 }}>Free</div>
+            <div style={{ color: "#9a9aa8", fontSize: 14, lineHeight: 1.6 }}>Make the deck, share the link, collaborate with the group. Keep it entirely digital if you like.</div>
+          </div>
+          <div style={{ flex: "1 1 260px", background: "rgba(216,178,74,0.06)", border: "1px solid #d8b24a55", borderRadius: 16, padding: 26 }}>
+            <div style={{ fontFamily: DISPLAY_FONT, fontSize: 20, marginBottom: 8 }}>Print it</div>
+            <div style={{ fontFamily: DISPLAY_FONT, fontSize: 32, color: "#f3cf5b", marginBottom: 12 }}>$39<span style={{ fontSize: 15, color: "#a8a8b8" }}> + shipping</span></div>
+            <div style={{ color: "#9a9aa8", fontSize: 14, lineHeight: 1.6 }}>A real, physical deck of your cards, printed and delivered.</div>
+          </div>
+        </div>
+        <div style={{ textAlign: "center", marginTop: 56 }}>
+          <PrimaryButton onClick={onOpen} style={{ fontSize: 17, padding: "16px 40px" }}>Open the app →</PrimaryButton>
+          <div style={{ marginTop: 14 }}>
+            <button onClick={onDemo} style={{ background: "none", border: "none", cursor: "pointer", color: "#6c6c7c", fontFamily: UI_FONT, fontSize: 13, textDecoration: "underline", textUnderlineOffset: 3 }}>
+              or look at a sample deck first
+            </button>
+          </div>
+        </div>
+      </LandingSection>
+
+      <footer style={{ borderTop: "1px solid #1e1e28", padding: "26px 24px 40px", textAlign: "center", color: "#5a5a68", fontSize: 13 }}>
+        <span style={{ fontFamily: DISPLAY_FONT, letterSpacing: 4, textTransform: "uppercase", color: "#8a7a45" }}>✦ Side Quest</span>
+        <div style={{ marginTop: 8 }}>Every event deserves a deck.</div>
+      </footer>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // SMALL COMPONENTS
 // ---------------------------------------------------------------------------
 
-const inputStyle = { width: "100%", boxSizing: "border-box", padding: "13px 15px", borderRadius: 10, border: "1px solid #3a3a46", background: "rgba(255,255,255,0.03)", color: "#f0f0f6", fontFamily: UI_FONT, fontSize: 15, marginBottom: 4 };
+const inputStyle ={ width: "100%", boxSizing: "border-box", padding: "13px 15px", borderRadius: 10, border: "1px solid #3a3a46", background: "rgba(255,255,255,0.03)", color: "#f0f0f6", fontFamily: UI_FONT, fontSize: 15, marginBottom: 4 };
 
 const navBtn = { fontFamily: UI_FONT, fontSize: 13, padding: "8px 14px", borderRadius: 8, border: "1px solid #3a3a46", background: "rgba(255,255,255,0.03)", color: "#c8c8d4", cursor: "pointer" };
 
