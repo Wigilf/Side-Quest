@@ -473,6 +473,28 @@ const CURRENCY = process.env.CURRENCY || "usd";
 const DECK_PRICE_CENTS = Number(process.env.DECK_PRICE_CENTS || 3900); // $39
 const SHIPPING_CENTS = Number(process.env.SHIPPING_CENTS || 700);      // $7
 const SITE_URL = process.env.SITE_URL || "https://wigilf.github.io/Side-Quest/";
+
+// ---- Marketplace take rate ------------------------------------------------
+// Basis points rather than a percentage so the rate can be tuned without ever
+// touching floating point. 1200 = 12%.
+//
+// Charged to the CREATOR ONLY — the buyer pays exactly the listed price, with
+// nothing added at checkout. That is deliberate positioning: Fiverr takes 20%
+// from the seller plus 5.5% from the buyer plus a small-order fee, roughly 25%
+// of the transaction taken from both sides, and the opacity of that is what
+// illustrators object to loudest. "You keep 88%, your price is the price they
+// pay" is the recruiting argument, so resist adding a buyer-side fee later.
+const PLATFORM_FEE_BPS = Number(process.env.PLATFORM_FEE_BPS || 1200);
+
+// Split a listing price into the creator's earnings and our fee. The fee is
+// rounded and the creator takes the remainder, so the two always sum back to
+// the price exactly — rounding can never lose or invent a cent, which matters
+// because these numbers are written to an append-only ledger and must balance.
+function splitPrice(priceCents, bps = PLATFORM_FEE_BPS) {
+  const price = Math.max(0, Math.round(Number(priceCents) || 0));
+  const platformFeeCents = Math.round((price * bps) / 10000);
+  return { priceCents: price, platformFeeCents, creatorEarningsCents: price - platformFeeCents };
+}
 const SHIP_COUNTRIES = (process.env.SHIP_COUNTRIES || "US,CA,GB,IE,FR,DE,ES,IT,NL,PT,AU,NZ")
   .split(",").map((s) => s.trim()).filter(Boolean);
 
