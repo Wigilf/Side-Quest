@@ -31,18 +31,27 @@ Run. Set the same env vars there.
 
 ## 2. Point the frontend at the backend
 
-The backend URL is baked into the frontend at build time.
+The backend URL is baked into the frontend at build time. It lives in
+**`.env.production`** (committed — it's a public URL, not a secret):
 
 ```bash
-# .env (or your CI env)
-VITE_API_BASE=https://<your-backend-url>
+# .env.production — used by `npm run build`
+VITE_API_BASE=https://sidequest-backend-bpoa.onrender.com
 # VITE_API_TOKEN=...   # only if you set SIDEQUEST_API_TOKEN on the backend
 ```
+
+Keep this out of `.env`. That file is for local dev and points `VITE_API_BASE`
+at `http://localhost:8787`; Vite gives `.env.production` priority during
+`vite build`, so the two no longer fight. Putting the production URL in `.env`
+means `npm run dev` talks to Render, and — worse — forgetting to override it
+ships a bundle pointing at localhost, which breaks the live site silently.
 
 Then rebuild and redeploy the static site:
 
 ```bash
 npm run build
+# sanity check before pushing — should print the Render URL and nothing else:
+grep -o 'https://[a-z0-9.-]*onrender\.com' dist/assets/*.js | sort -u
 # push dist/ to the gh-pages branch (see the deploy steps you've used before)
 ```
 
