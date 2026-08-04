@@ -530,8 +530,26 @@ async function stripeCreateCheckoutSession({ deckName, cardCount, quantity }, ct
     body: new URLSearchParams(toForm(params)).toString(),
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(`Stripe error ${res.status}: ${data?.error?.message || "unknown"}`);
+  if (!res.ok) {
+    // Stripe echoes the offending key back in auth errors (middle-redacted, but
+    // still). This message reaches the browser, so strip anything key-shaped
+    // before forwarding — same reason the art path scrubs the Google key.
+    const msg = String(data?.error?.message || "unknown")
+      .replace(/\b(sk|rk|pk|whsec|mk)_[A-Za-z0-9_*]+/g, "[redacted]");
+    // A 401 here is our misconfiguration, not the caller's fault.
+    throw httpErr(res.status === 401 || res.status === 403 ? 502 : res.status, `Stripe error ${res.status}: ${msg}`);
+  }
   return { checkoutUrl: data.url };
+}
+
+// `stripe: !!STRIPE_SECRET_KEY` reported healthy while every checkout failed
+// 401 on a malformed key, which is worse than reporting nothing. Check the
+// shape so the flag means "plausibly usable" rather than "someone set a string".
+function stripeKeyInfo() {
+  const k = process.env.STRIPE_SECRET_KEY || "";
+  if (!k) return { configured: false, mode: null, malformed: false };
+  const m = /^(sk|rk)_(test|live)_/.exec(k);
+  return { configured: !!m, mode: m ? m[2] : null, malformed: !m };
 }
 
 function verifyStripeSig(rawBody, sigHeader, secret) {
@@ -706,7 +724,9 @@ const routes = {
     ok: true,
     anthropic: !!process.env.ANTHROPIC_API_KEY,
     google: !!process.env.GOOGLE_API_KEY,
-    stripe: !!process.env.STRIPE_SECRET_KEY,
+    stripe: stripeKeyInfo().configured,
+    stripeMode: stripeKeyInfo().mode,
+    ...(stripeKeyInfo().malformed ? { stripeKeyMalformed: true } : {}),
     db: dbEnabled(),
     model: ANTHROPIC_MODEL,
     imageModel: GEMINI_IMAGE_MODEL,
