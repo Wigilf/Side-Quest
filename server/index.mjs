@@ -552,10 +552,17 @@ function stripeKeyInfo() {
   return { configured: !!m, mode: m ? m[2] : null, malformed: !m };
 }
 
+// Stripe's own libraries reject events whose timestamp is outside a tolerance,
+// and so must we: a signature stays valid forever otherwise, so anyone who ever
+// captures one signed webhook can replay it indefinitely.
+const STRIPE_SIG_TOLERANCE_S = Number(process.env.STRIPE_SIG_TOLERANCE_S || 300);
+
 function verifyStripeSig(rawBody, sigHeader, secret) {
   if (!sigHeader || !secret) return false;
   const parts = Object.fromEntries(sigHeader.split(",").map((kv) => kv.split("=")));
   if (!parts.t || !parts.v1) return false;
+  const age = Math.abs(Math.floor(Date.now() / 1000) - Number(parts.t));
+  if (!Number.isFinite(age) || age > STRIPE_SIG_TOLERANCE_S) return false;
   const expected = crypto.createHmac("sha256", secret).update(`${parts.t}.${rawBody}`).digest("hex");
   try { return crypto.timingSafeEqual(Buffer.from(parts.v1), Buffer.from(expected)); }
   catch { return false; }
