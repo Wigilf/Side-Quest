@@ -347,9 +347,20 @@ const API_BASE = (import.meta.env && import.meta.env.VITE_API_BASE) || "";
 const API_TOKEN = (import.meta.env && import.meta.env.VITE_API_TOKEN) || "";
 const AI_ENABLED = !!API_BASE;
 
+// Session token from /api/auth/*. Persisted so a refresh stays signed in, and
+// it takes precedence over API_TOKEN — that one is a deployment-wide shared
+// secret for gating paid endpoints, not a user identity, and both would
+// otherwise compete for the same Authorization header.
+const SESSION_KEY = "sq_session";
+function getSessionToken() { try { return localStorage.getItem(SESSION_KEY) || ""; } catch { return ""; } }
+function setSessionToken(t) {
+  try { t ? localStorage.setItem(SESSION_KEY, t) : localStorage.removeItem(SESSION_KEY); } catch { /* private mode */ }
+}
+
 async function api(method, pathname, body) {
   const headers = { "Content-Type": "application/json" };
-  if (API_TOKEN) headers["Authorization"] = `Bearer ${API_TOKEN}`;
+  const bearer = getSessionToken() || API_TOKEN;
+  if (bearer) headers["Authorization"] = `Bearer ${bearer}`;
   const opts = { method, headers };
   if (body !== undefined) opts.body = JSON.stringify(body);
   const res = await fetch(`${API_BASE}${pathname}`, opts);
@@ -1049,6 +1060,8 @@ function CollabBanner({ name, setName, onAdd, newCount, onRefresh, t }) {
 export default function SideQuest() {
   useGoogleFonts();
   const [landing, setLanding] = useState(true);
+  const [account, setAccount] = useState(null);   // {id,email,displayName} once signed in
+  const [authOpen, setAuthOpen] = useState(false);
   const [step, setStep] = useState(0);
 
   const [user, setUser] = useState({ name: "", email: "" });
@@ -1100,6 +1113,40 @@ export default function SideQuest() {
     } catch (e) { /* offline / no decks yet — fine */ }
   }
   useEffect(() => { refreshDecks(); }, []);
+
+  // ---- Accounts -----------------------------------------------------------
+  // Restore the session on load. A stored token that no longer resolves is
+  // expired or revoked, so drop it rather than retrying every request with it.
+  useEffect(() => {
+    if (!API_BASE || !getSessionToken()) return;
+    (async () => {
+      try {
+        const r = await api("GET", "/api/auth/me");
+        setAccount(r.user);
+        refreshDecks();
+      } catch (e) { setSessionToken(""); setAccount(null); }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function doAuth(mode, { email, password, displayName }) {
+    const r = await api("POST", mode === "signup" ? "/api/auth/signup" : "/api/auth/login",
+      mode === "signup" ? { email, password, displayName } : { email, password });
+    setSessionToken(r.token);
+    setAccount(r.user);
+    // Claim whatever this browser built before signing up, so that work isn't
+    // stranded behind an anonymous token the account can't see.
+    try { await api("POST", "/api/sq/adopt", { ownerToken: getOwnerToken() }); } catch (e) { /* non-fatal */ }
+    await refreshDecks();
+    return r.user;
+  }
+
+  async function signOut() {
+    try { await api("POST", "/api/auth/logout"); } catch (e) { /* token may already be dead */ }
+    setSessionToken("");
+    setAccount(null);
+    refreshDecks();
+  }
 
   // Detect a return from Stripe Checkout (?checkout=success|cancel) and clean the URL.
   useEffect(() => {
@@ -1510,15 +1557,21 @@ export default function SideQuest() {
   // ===== LANDING =====
   if (landing) {
     return (
-      <Landing
-        // The landing scrolls, the app does not reset it — without this you
-        // enter the builder already halfway down the page.
-        onOpen={() => { setLanding(false); window.scrollTo(0, 0); }}
-        onDemo={() => { loadDemo(); window.scrollTo(0, 0); }}
-        savedCount={savedDecks.length}
-        onDecks={() => { setShowDecks(true); setLanding(false); window.scrollTo(0, 0); }}
-        banner={checkoutReturn && <CheckoutBanner status={checkoutReturn} onClose={() => setCheckoutReturn(null)} />}
-      />
+      <>
+        <Landing
+          // The landing scrolls, the app does not reset it — without this you
+          // enter the builder already halfway down the page.
+          onOpen={() => { setLanding(false); window.scrollTo(0, 0); }}
+          onDemo={() => { loadDemo(); window.scrollTo(0, 0); }}
+          savedCount={savedDecks.length}
+          onDecks={() => { setShowDecks(true); setLanding(false); window.scrollTo(0, 0); }}
+          banner={checkoutReturn && <CheckoutBanner status={checkoutReturn} onClose={() => setCheckoutReturn(null)} />}
+          account={account}
+          onSignIn={() => setAuthOpen(true)}
+          onSignOut={signOut}
+        />
+        {authOpen && <AuthModal onClose={() => setAuthOpen(false)} onSubmit={doAuth} />}
+      </>
     );
   }
 
@@ -1527,11 +1580,13 @@ export default function SideQuest() {
     <div style={{ minHeight: "100vh", background: `radial-gradient(1200px 600px at 50% -10%, ${themeObj.bg[1]} 0%, #14121c 50%, #0a090f 100%)`, color: "#e8e8f0", fontFamily: UI_FONT, padding: "0 0 80px", transition: "background .6s" }}>
       <GlobalCSS />
       {checkoutReturn && <CheckoutBanner status={checkoutReturn} onClose={() => setCheckoutReturn(null)} />}
+      {authOpen && <AuthModal onClose={() => setAuthOpen(false)} onSubmit={doAuth} />}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "18px 22px 0", maxWidth: 1040, margin: "0 auto" }}>
         <div onClick={() => setLanding(true)} style={{ cursor: "pointer", fontFamily: DISPLAY_FONT, fontSize: 13, letterSpacing: 5, textTransform: "uppercase", color: "#d8b24a" }}>✦ Side Quest</div>
-        <div style={{ display: "flex", gap: 10 }}>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" }}>
           <button onClick={newDeck} style={navBtn}>＋ New</button>
           <button onClick={() => setShowDecks(true)} style={navBtn}>◈ My decks{savedDecks.length ? ` (${savedDecks.length})` : ""}</button>
+          <AccountButton account={account} onSignIn={() => setAuthOpen(true)} onSignOut={signOut} />
         </div>
       </div>
       <div style={{ textAlign: "center", padding: "16px 20px 10px" }}>
@@ -1816,6 +1871,86 @@ function DecksModal({ decks, onClose, onOpen, onDelete, onNew }) {
 }
 
 // ---------------------------------------------------------------------------
+// ACCOUNTS
+// ---------------------------------------------------------------------------
+
+// Signing in is optional for building a deck and mandatory for the
+// marketplace, so this is a dismissible modal rather than a gate.
+function AuthModal({ onClose, onSubmit }) {
+  const [mode, setMode] = useState("login");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const signup = mode === "signup";
+  // Mirrors the server's rule (authSignup: valid email, 8+ chars) so the user
+  // finds out before a round trip, not after.
+  const ok = email.includes("@") && password.length >= 8;
+
+  async function submit(e) {
+    e.preventDefault();
+    if (!ok || busy) return;
+    setBusy(true); setErr("");
+    try {
+      await onSubmit(mode, { email: email.trim(), password, displayName: displayName.trim() });
+      onClose();
+    } catch (e2) { setErr(e2.message || "Something went wrong"); setBusy(false); }
+  }
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 50, background: "rgba(0,0,0,0.6)", backdropFilter: "blur(3px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+      <form onClick={(e) => e.stopPropagation()} onSubmit={submit} className="ql-fade"
+        style={{ width: "100%", maxWidth: 400, background: "#16141e", border: "1px solid #2c2c36", borderRadius: 18, padding: 26, boxShadow: "0 40px 80px rgba(0,0,0,0.5)" }}>
+        <h2 style={{ fontFamily: DISPLAY_FONT, fontSize: 24, margin: "0 0 6px" }}>{signup ? "Create an account" : "Sign in"}</h2>
+        <p style={{ color: "#9a9aa8", fontSize: 13, margin: "0 0 20px", lineHeight: 1.5 }}>
+          {signup
+            ? "Keeps your decks when you switch device or clear your browser."
+            : "Welcome back."}
+        </p>
+
+        {signup && (
+          <input value={displayName} onChange={(e) => setDisplayName(e.target.value)}
+            placeholder="Display name (optional)" style={{ ...inputStyle, marginBottom: 10 }} />
+        )}
+        <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" autoComplete="email"
+          placeholder="you@example.com" style={{ ...inputStyle, marginBottom: 10 }} />
+        <input value={password} onChange={(e) => setPassword(e.target.value)} type="password"
+          autoComplete={signup ? "new-password" : "current-password"}
+          placeholder={signup ? "Password (8+ characters)" : "Password"} style={{ ...inputStyle, marginBottom: 6 }} />
+
+        {err && <div style={{ color: "#ffc4cb", background: "rgba(239,91,107,0.12)", border: "1px solid #ef5b6b", borderRadius: 8, padding: "9px 12px", fontSize: 13, margin: "10px 0" }}>⚠ {err}</div>}
+
+        <PrimaryButton onClick={submit} disabled={!ok || busy} style={{ width: "100%", marginTop: 14 }}>
+          {busy ? "…" : signup ? "Create account" : "Sign in"}
+        </PrimaryButton>
+
+        <div style={{ textAlign: "center", marginTop: 14 }}>
+          <button type="button" onClick={() => { setMode(signup ? "login" : "signup"); setErr(""); }}
+            style={{ background: "none", border: "none", cursor: "pointer", color: "#d8b24a", fontFamily: UI_FONT, fontSize: 13 }}>
+            {signup ? "Already have an account? Sign in" : "New here? Create an account"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+// Header control: signed out shows a sign-in button, signed in shows who you
+// are and a way out.
+function AccountButton({ account, onSignIn, onSignOut }) {
+  if (!account) return <button onClick={onSignIn} style={navBtn}>Sign in</button>;
+  const label = account.displayName || account.email;
+  return (
+    <button onClick={onSignOut} title={`Signed in as ${account.email} — click to sign out`}
+      style={{ ...navBtn, borderColor: "#d8b24a55", color: "#d8b24a", maxWidth: 190, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+      ◆ {label}
+    </button>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // LANDING PAGE
 // ---------------------------------------------------------------------------
 // Explains the product to someone who has never seen it. The builder itself is
@@ -1850,7 +1985,7 @@ function LandingSection({ eyebrow, title, sub, children, style }) {
   );
 }
 
-function Landing({ onOpen, onDemo, savedCount, onDecks, banner }) {
+function Landing({ onOpen, onDemo, savedCount, onDecks, banner, account, onSignIn, onSignOut }) {
   return (
     <div style={{ minHeight: "100vh", background: "radial-gradient(1200px 700px at 50% -5%, #2a1d3f 0%, #15121d 45%, #08070d 100%)", color: "#e8e8f0", fontFamily: UI_FONT }}>
       <GlobalCSS />
@@ -1867,6 +2002,7 @@ function Landing({ onOpen, onDemo, savedCount, onDecks, banner }) {
             {savedCount > 0 && (
               <button onClick={onDecks} style={{ ...navBtn, whiteSpace: "nowrap" }}>◈ My decks ({savedCount})</button>
             )}
+            <AccountButton account={account} onSignIn={onSignIn} onSignOut={onSignOut} />
             <PrimaryButton onClick={onOpen} style={{ whiteSpace: "nowrap" }}>Open the app →</PrimaryButton>
           </div>
         </div>
