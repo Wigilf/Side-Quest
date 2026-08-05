@@ -188,7 +188,10 @@ function deckIndexRow(d) {
   return { id: d.id, name: d.name, theme: d.theme, eventType: d.event_type, count: d.card_count, updatedAt: msOf(d.updated_at), collabToken: d.collab_token || null, collabEnabled: !!d.collab_enabled };
 }
 
-async function sqSave({ ownerToken, deck }) {
+// Anonymous building still has to work, so ownerToken remains the primary key
+// of ownership. Signing in additionally stamps user_id, which is what lets a
+// deck follow you to another browser — an anonymous token never can.
+async function sqSave({ ownerToken, deck }, ctx) {
   requireDb();
   if (!ownerToken) throw httpErr(400, "ownerToken required");
   if (!deck || !deck.id) throw httpErr(400, "deck.id required");
@@ -197,28 +200,59 @@ async function sqSave({ ownerToken, deck }) {
   if (existing && existing.owner_token !== ownerToken) throw httpErr(403, "not your deck");
   const collabToken = existing?.collab_token || randToken();
   const cardCount = (deck.cards || []).length;
+  const userId = ctx?.userId || null;
   await query(
-    `INSERT INTO sq_decks (id, owner_token, collab_token, name, theme, event_type, card_count, payload, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8, now())
-     ON CONFLICT (id) DO UPDATE SET name=$4, theme=$5, event_type=$6, card_count=$7, payload=$8, updated_at=now()
+    `INSERT INTO sq_decks (id, owner_token, collab_token, name, theme, event_type, card_count, payload, user_id, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, now())
+     ON CONFLICT (id) DO UPDATE SET name=$4, theme=$5, event_type=$6, card_count=$7, payload=$8,
+       -- COALESCE, not assignment: a deck already claimed by an account must
+       -- not be un-claimed by a later anonymous save from the same browser.
+       user_id = COALESCE(sq_decks.user_id, $9), updated_at=now()
      WHERE sq_decks.owner_token = $2`,
-    [id, ownerToken, collabToken, deck.name || "Untitled deck", deck.theme || null, deck.eventType || null, cardCount, deck]
+    [id, ownerToken, collabToken, deck.name || "Untitled deck", deck.theme || null, deck.eventType || null, cardCount, deck, userId]
   );
   const row = (await query("SELECT updated_at FROM sq_decks WHERE id = $1", [id])).rows[0];
   return { id, collabToken, updatedAt: row ? msOf(row.updated_at) : Date.now() };
 }
 
-async function sqList({ ownerToken }) {
+async function sqList({ ownerToken }, ctx) {
   requireDb();
-  if (!ownerToken) throw httpErr(400, "ownerToken required");
-  const r = await query("SELECT id, name, theme, event_type, card_count, updated_at, collab_token, collab_enabled FROM sq_decks WHERE owner_token = $1 ORDER BY updated_at DESC", [ownerToken]);
+  const userId = ctx?.userId || null;
+  if (!ownerToken && !userId) throw httpErr(400, "ownerToken required");
+  // Union of "this browser's decks" and "this account's decks", so signing in
+  // adds your other devices' decks without hiding the ones you made anonymously.
+  const r = await query(
+    `SELECT id, name, theme, event_type, card_count, updated_at, collab_token, collab_enabled
+       FROM sq_decks
+      WHERE owner_token = $1 OR ($2::text IS NOT NULL AND user_id = $2)
+      ORDER BY updated_at DESC`,
+    [ownerToken || "", userId]
+  );
   return { decks: r.rows.map(deckIndexRow) };
 }
 
-async function sqDelete({ id, ownerToken }) {
+async function sqDelete({ id, ownerToken }, ctx) {
   requireDb();
-  await query("DELETE FROM sq_decks WHERE id = $1 AND owner_token = $2", [id, ownerToken]);
+  const userId = ctx?.userId || null;
+  await query(
+    `DELETE FROM sq_decks WHERE id = $1 AND (owner_token = $2 OR ($3::text IS NOT NULL AND user_id = $3))`,
+    [id, ownerToken || "", userId]
+  );
   return { ok: true };
+}
+
+// Claim the decks this browser made anonymously. Called right after sign-in so
+// work done before making an account isn't stranded. Only claims unclaimed
+// decks, so it can never steal one already belonging to another account.
+async function sqAdopt({ ownerToken }, ctx) {
+  requireDb();
+  requireUser(ctx);
+  if (!ownerToken) throw httpErr(400, "ownerToken required");
+  const r = await query(
+    `UPDATE sq_decks SET user_id = $1 WHERE owner_token = $2 AND user_id IS NULL RETURNING id`,
+    [ctx.userId, ownerToken]
+  );
+  return { adopted: r.rowCount };
 }
 
 // Public read by share id (view / clone).
@@ -838,10 +872,11 @@ const server = http.createServer(async (req, res) => {
     let result, m;
     // Server-side deck storage + share + async collaboration.
     if (p.startsWith("/api/sq/")) {
-      if (req.method === "POST" && p === "/api/sq/save") result = await sqSave(body);
-      else if (req.method === "GET" && p === "/api/sq/list") result = await sqList({ ownerToken: q.get("ownerToken") });
+      if (req.method === "POST" && p === "/api/sq/save") result = await sqSave(body, ctx);
+      else if (req.method === "POST" && p === "/api/sq/adopt") result = await sqAdopt(body, ctx);
+      else if (req.method === "GET" && p === "/api/sq/list") result = await sqList({ ownerToken: q.get("ownerToken") }, ctx);
       else if (req.method === "GET" && (m = p.match(/^\/api\/sq\/deck\/([^/]+)$/))) result = await sqGet(decodeURIComponent(m[1]));
-      else if (req.method === "DELETE" && (m = p.match(/^\/api\/sq\/deck\/([^/]+)$/))) result = await sqDelete({ id: decodeURIComponent(m[1]), ownerToken: q.get("ownerToken") });
+      else if (req.method === "DELETE" && (m = p.match(/^\/api\/sq\/deck\/([^/]+)$/))) result = await sqDelete({ id: decodeURIComponent(m[1]), ownerToken: q.get("ownerToken") }, ctx);
       else if (req.method === "POST" && (m = p.match(/^\/api\/sq\/deck\/([^/]+)\/collab$/))) result = await sqCollabEnable({ id: decodeURIComponent(m[1]), ownerToken: body.ownerToken });
       else if (req.method === "GET" && (m = p.match(/^\/api\/sq\/collab\/([^/]+)\/poll$/))) result = await sqCollabPoll(decodeURIComponent(m[1]), q.get("since"));
       else if (req.method === "POST" && (m = p.match(/^\/api\/sq\/collab\/([^/]+)\/card$/))) result = await sqCollabUpsertCard({ token: decodeURIComponent(m[1]), ...body });
