@@ -143,6 +143,236 @@ async function authLogin({ email, password }) {
   return { user: { id: u.id, email: u.email, displayName: u.display_name }, token: await createSession(u.id) };
 }
 
+// ---- Marketplace: creators + listings -------------------------------------
+// Supply side only; no money moves here. Two disciplines sell: `artist`
+// (illustration, delivered as uploaded files) and `writer` (adventure lore,
+// authored in the builder). Each sells `catalog` items made once and sold many
+// times, and `commission` work made to order.
+//
+// Onboarding is juried, not open: creators start at 'applied' and only an
+// approved creator can publish. Targeting illustrators of Magic-artist calibre
+// means curation rather than rank-by-volume search, and an open signup that
+// anyone can list on is the thing that makes a marketplace feel like Fiverr.
+
+// Below roughly $10 the fixed $0.30 of card processing eats most of the take,
+// so a floor keeps trivial listings from being value-destroying.
+const MIN_LISTING_PRICE_CENTS = Number(process.env.MIN_LISTING_PRICE_CENTS || 1500);
+const DISCIPLINES = new Set(["artist", "writer"]);
+const LISTING_KINDS = new Set(["catalog", "commission"]);
+
+function creatorRow(r) {
+  return {
+    id: r.id, discipline: r.discipline, displayName: r.display_name,
+    headline: r.headline, bio: r.bio, portfolio: r.portfolio || [], links: r.links || {},
+    status: r.status, payoutsEnabled: r.payouts_enabled,
+    ratingAvg: r.rating_avg == null ? null : Number(r.rating_avg), ratingCount: r.rating_count,
+    createdAt: msOf(r.created_at),
+  };
+}
+
+function listingRow(r) {
+  return {
+    id: r.id, creatorId: r.creator_id, discipline: r.discipline, kind: r.kind,
+    title: r.title, summary: r.summary, description: r.description,
+    priceCents: r.price_cents, currency: r.currency,
+    deliveryDays: r.delivery_days, revisionsIncluded: r.revisions_included,
+    previewUrls: r.preview_urls || [], status: r.status,
+    createdAt: msOf(r.created_at), updatedAt: msOf(r.updated_at),
+    ...(r.creator_name ? { creator: { id: r.creator_id, displayName: r.creator_name, ratingAvg: r.rating_avg == null ? null : Number(r.rating_avg), ratingCount: r.rating_count } } : {}),
+  };
+}
+
+async function creatorApply(body, ctx) {
+  requireDb(); requireUser(ctx);
+  const discipline = String(body?.discipline || "").toLowerCase();
+  if (!DISCIPLINES.has(discipline)) throw httpErr(422, "discipline must be 'artist' or 'writer'");
+  const displayName = String(body?.displayName || "").trim();
+  if (!displayName) throw httpErr(422, "displayName required");
+  const id = crypto.randomUUID();
+  try {
+    const r = await query(
+      `INSERT INTO mk_creators (id, user_id, discipline, display_name, headline, bio, portfolio, links)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+      [id, ctx.userId, discipline, displayName, body?.headline || null, body?.bio || null,
+       JSON.stringify(body?.portfolio || []), JSON.stringify(body?.links || {})]
+    );
+    return { creator: creatorRow(r.rows[0]) };
+  } catch (e) {
+    // UNIQUE (user_id, discipline): the same person may sell as both an artist
+    // and a writer, but not hold two profiles in one discipline.
+    if (String(e.message).includes("mk_creators_user_id_discipline_key")) {
+      throw httpErr(409, `you already have a ${discipline} profile`);
+    }
+    throw e;
+  }
+}
+
+async function creatorMine(ctx) {
+  requireDb(); requireUser(ctx);
+  const r = await query("SELECT * FROM mk_creators WHERE user_id = $1 ORDER BY created_at", [ctx.userId]);
+  return { creators: r.rows.map(creatorRow) };
+}
+
+async function creatorUpdate(id, body, ctx) {
+  requireDb(); requireUser(ctx);
+  const own = (await query("SELECT * FROM mk_creators WHERE id = $1 AND user_id = $2", [id, ctx.userId])).rows[0];
+  if (!own) throw httpErr(404, "not found");
+  const r = await query(
+    `UPDATE mk_creators SET
+       display_name = COALESCE($2, display_name), headline = COALESCE($3, headline),
+       bio = COALESCE($4, bio), portfolio = COALESCE($5, portfolio), links = COALESCE($6, links),
+       updated_at = now()
+     WHERE id = $1 RETURNING *`,
+    [id, body?.displayName ?? null, body?.headline ?? null, body?.bio ?? null,
+     body?.portfolio ? JSON.stringify(body.portfolio) : null,
+     body?.links ? JSON.stringify(body.links) : null]
+  );
+  return { creator: creatorRow(r.rows[0]) };
+}
+
+// Public browse. Only approved creators are discoverable — an application is
+// not a storefront.
+async function creatorBrowse(q) {
+  requireDb();
+  const discipline = q.get("discipline");
+  const limit = Math.min(60, Math.max(1, Number(q.get("limit")) || 24));
+  const r = await query(
+    `SELECT * FROM mk_creators
+      WHERE status = 'approved' AND ($1::text IS NULL OR discipline = $1)
+      ORDER BY rating_count DESC, created_at DESC LIMIT $2`,
+    [DISCIPLINES.has(discipline) ? discipline : null, limit]
+  );
+  return { creators: r.rows.map(creatorRow) };
+}
+
+async function creatorPublic(id) {
+  requireDb();
+  const c = (await query("SELECT * FROM mk_creators WHERE id = $1 AND status = 'approved'", [id])).rows[0];
+  if (!c) throw httpErr(404, "not found");
+  const l = await query("SELECT * FROM mk_listings WHERE creator_id = $1 AND status = 'published' ORDER BY created_at DESC", [id]);
+  return { creator: creatorRow(c), listings: l.rows.map(listingRow) };
+}
+
+// Resolve a creator profile the caller actually owns, for listing mutations.
+async function ownedCreator(creatorId, ctx) {
+  const c = (await query("SELECT * FROM mk_creators WHERE id = $1 AND user_id = $2", [creatorId, ctx.userId])).rows[0];
+  if (!c) throw httpErr(403, "not your creator profile");
+  return c;
+}
+
+function validateListing(body, creator, { partial = false } = {}) {
+  const out = {};
+  if (!partial || body.kind !== undefined) {
+    const kind = String(body?.kind || "").toLowerCase();
+    if (!LISTING_KINDS.has(kind)) throw httpErr(422, "kind must be 'catalog' or 'commission'");
+    out.kind = kind;
+  }
+  if (!partial || body.title !== undefined) {
+    const title = String(body?.title || "").trim();
+    if (title.length < 3) throw httpErr(422, "title required");
+    out.title = title;
+  }
+  if (!partial || body.priceCents !== undefined) {
+    const price = Math.round(Number(body?.priceCents));
+    if (!Number.isFinite(price) || price < MIN_LISTING_PRICE_CENTS) {
+      throw httpErr(422, `price must be at least ${MIN_LISTING_PRICE_CENTS} cents`);
+    }
+    out.priceCents = price;
+  }
+  // A commission is a promise about time, so it needs one.
+  const kind = out.kind || body?.kind;
+  if (kind === "commission" && (!partial || body.deliveryDays !== undefined)) {
+    const days = Math.round(Number(body?.deliveryDays));
+    if (!Number.isFinite(days) || days < 1 || days > 365) throw httpErr(422, "commission listings need deliveryDays (1-365)");
+    out.deliveryDays = days;
+  }
+  return out;
+}
+
+async function listingCreate(body, ctx) {
+  requireDb(); requireUser(ctx);
+  const creator = await ownedCreator(String(body?.creatorId || ""), ctx);
+  const v = validateListing(body || {}, creator);
+  const id = crypto.randomUUID();
+  const r = await query(
+    `INSERT INTO mk_listings (id, creator_id, discipline, kind, title, summary, description,
+        price_cents, delivery_days, revisions_included, preview_urls, payload, status)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'draft') RETURNING *`,
+    [id, creator.id, creator.discipline, v.kind, v.title, body?.summary || null, body?.description || null,
+     v.priceCents, v.deliveryDays ?? null, Number.isFinite(Number(body?.revisionsIncluded)) ? Number(body.revisionsIncluded) : 2,
+     JSON.stringify(body?.previewUrls || []), body?.payload ? JSON.stringify(body.payload) : null]
+  );
+  return { listing: listingRow(r.rows[0]) };
+}
+
+async function listingUpdate(id, body, ctx) {
+  requireDb(); requireUser(ctx);
+  const existing = (await query(
+    `SELECT l.* FROM mk_listings l JOIN mk_creators c ON c.id = l.creator_id
+      WHERE l.id = $1 AND c.user_id = $2`, [id, ctx.userId])).rows[0];
+  if (!existing) throw httpErr(404, "not found");
+  const creator = await ownedCreator(existing.creator_id, ctx);
+  const v = validateListing({ ...body, kind: body?.kind ?? existing.kind }, creator, { partial: true });
+
+  // Publishing is the gate curation actually enforces.
+  let status = existing.status;
+  if (body?.status !== undefined) {
+    const want = String(body.status);
+    if (!["draft", "published", "paused", "removed"].includes(want)) throw httpErr(422, "bad status");
+    if (want === "published" && creator.status !== "approved") {
+      throw httpErr(403, "your creator profile is not approved yet");
+    }
+    status = want;
+  }
+  const r = await query(
+    `UPDATE mk_listings SET
+       title = COALESCE($2,title), summary = COALESCE($3,summary), description = COALESCE($4,description),
+       price_cents = COALESCE($5,price_cents), delivery_days = COALESCE($6,delivery_days),
+       revisions_included = COALESCE($7,revisions_included), preview_urls = COALESCE($8,preview_urls),
+       status = $9, updated_at = now()
+     WHERE id = $1 RETURNING *`,
+    [id, v.title ?? null, body?.summary ?? null, body?.description ?? null,
+     v.priceCents ?? null, v.deliveryDays ?? null,
+     body?.revisionsIncluded ?? null, body?.previewUrls ? JSON.stringify(body.previewUrls) : null, status]
+  );
+  return { listing: listingRow(r.rows[0]) };
+}
+
+async function listingMine(ctx) {
+  requireDb(); requireUser(ctx);
+  const r = await query(
+    `SELECT l.* FROM mk_listings l JOIN mk_creators c ON c.id = l.creator_id
+      WHERE c.user_id = $1 AND l.status <> 'removed' ORDER BY l.updated_at DESC`, [ctx.userId]);
+  return { listings: r.rows.map(listingRow) };
+}
+
+async function listingBrowse(q) {
+  requireDb();
+  const discipline = q.get("discipline");
+  const kind = q.get("kind");
+  const limit = Math.min(60, Math.max(1, Number(q.get("limit")) || 24));
+  const r = await query(
+    `SELECT l.*, c.display_name AS creator_name, c.rating_avg, c.rating_count
+       FROM mk_listings l JOIN mk_creators c ON c.id = l.creator_id
+      WHERE l.status = 'published' AND c.status = 'approved'
+        AND ($1::text IS NULL OR l.discipline = $1)
+        AND ($2::text IS NULL OR l.kind = $2)
+      ORDER BY c.rating_count DESC, l.created_at DESC LIMIT $3`,
+    [DISCIPLINES.has(discipline) ? discipline : null, LISTING_KINDS.has(kind) ? kind : null, limit]
+  );
+  return { listings: r.rows.map(listingRow) };
+}
+
+async function listingPublic(id) {
+  requireDb();
+  const r = await query(
+    `SELECT l.*, c.display_name AS creator_name, c.rating_avg, c.rating_count
+       FROM mk_listings l JOIN mk_creators c ON c.id = l.creator_id
+      WHERE l.id = $1 AND l.status = 'published' AND c.status = 'approved'`, [id]);
+  if (!r.rows[0]) throw httpErr(404, "not found");
+  return { listing: listingRow(r.rows[0]) };
+}
+
 // ---- Deck persistence (replaces the client's localStorage shim) ------------
 
 async function decksList(ctx) {
@@ -711,7 +941,10 @@ Return ONLY JSON: {"cards":[{...}]} with exactly ${n} cards.`;
 function corsHeaders(origin) {
   const h = {
     "access-control-allow-headers": "content-type, authorization",
-    "access-control-allow-methods": "POST, GET, OPTIONS",
+    // DELETE was already routed (deck delete) but never advertised here, so the
+    // browser's preflight rejected it before the server ever saw the request.
+    // PATCH joins it for marketplace edits.
+    "access-control-allow-methods": "GET, POST, PATCH, DELETE, OPTIONS",
     vary: "Origin",
   };
   if (ALLOW_ALL_ORIGINS) h["access-control-allow-origin"] = "*";
@@ -853,7 +1086,10 @@ const server = http.createServer(async (req, res) => {
 
   // Rate-limit money/key-spending + auth endpoints (blunt brute-force/abuse).
   const sqWrite = p.startsWith("/api/sq/") && (req.method === "POST" || req.method === "DELETE");
-  const rateLimitedPath = PAID.has(p) || sqWrite || p === "/api/checkout" || p === "/api/auth/login" || p === "/api/auth/signup";
+  // Marketplace writes are cheap but spammable — listings and profiles are
+  // public surface, so they get the same per-IP ceiling as deck writes.
+  const mkWrite = p.startsWith("/api/mk/") && req.method !== "GET";
+  const rateLimitedPath = PAID.has(p) || sqWrite || mkWrite || p === "/api/checkout" || p === "/api/auth/login" || p === "/api/auth/signup";
   if (rateLimitedPath) {
     if (PAID.has(p) && API_TOKEN) {
       const auth = req.headers.authorization || "";
@@ -866,10 +1102,30 @@ const server = http.createServer(async (req, res) => {
 
   try {
     const ctx = await resolveAuth(req);
-    const body = req.method === "POST" ? await readBody(req) : {};
+    // PATCH/PUT carry bodies too. Reading only POST meant every update silently
+    // received {} and became a no-op that still returned 200 — the worst
+    // possible failure shape, since the caller is told it worked.
+    const body = (req.method === "POST" || req.method === "PATCH" || req.method === "PUT")
+      ? await readBody(req) : {};
 
     const q = url.searchParams;
     let result, m;
+    // Marketplace: creator profiles + listings.
+    if (p.startsWith("/api/mk/")) {
+      if (req.method === "POST" && p === "/api/mk/creators") result = await creatorApply(body, ctx);
+      else if (req.method === "GET" && p === "/api/mk/creators/me") result = await creatorMine(ctx);
+      else if (req.method === "GET" && p === "/api/mk/creators") result = await creatorBrowse(q);
+      else if (req.method === "PATCH" && (m = p.match(/^\/api\/mk\/creators\/([^/]+)$/))) result = await creatorUpdate(decodeURIComponent(m[1]), body, ctx);
+      else if (req.method === "GET" && (m = p.match(/^\/api\/mk\/creators\/([^/]+)$/))) result = await creatorPublic(decodeURIComponent(m[1]));
+      else if (req.method === "POST" && p === "/api/mk/listings") result = await listingCreate(body, ctx);
+      else if (req.method === "GET" && p === "/api/mk/listings/mine") result = await listingMine(ctx);
+      else if (req.method === "GET" && p === "/api/mk/listings") result = await listingBrowse(q);
+      else if (req.method === "PATCH" && (m = p.match(/^\/api\/mk\/listings\/([^/]+)$/))) result = await listingUpdate(decodeURIComponent(m[1]), body, ctx);
+      else if (req.method === "GET" && (m = p.match(/^\/api\/mk\/listings\/([^/]+)$/))) result = await listingPublic(decodeURIComponent(m[1]));
+      else { send(res, 404, { error: "not_found" }, origin); return; }
+      send(res, 200, result, origin);
+      return;
+    }
     // Server-side deck storage + share + async collaboration.
     if (p.startsWith("/api/sq/")) {
       if (req.method === "POST" && p === "/api/sq/save") result = await sqSave(body, ctx);
