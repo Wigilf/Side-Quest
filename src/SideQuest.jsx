@@ -1071,7 +1071,13 @@ export default function SideQuest() {
   const [landing, setLanding] = useState(true);
   const [account, setAccount] = useState(null);   // {id,email,displayName} once signed in
   const [authOpen, setAuthOpen] = useState(false);
-  const [view, setView] = useState("");           // "" | "market" | "studio"
+  // "" | "market" | "studio" | "listing". Seeded synchronously from the URL so a
+  // ?listing= link opens straight onto the listing instead of flashing the
+  // landing page first.
+  const [openListingId, setOpenListingId] = useState(() => {
+    try { return new URLSearchParams(window.location.search).get("listing") || ""; } catch { return ""; }
+  });
+  const [view, setView] = useState(() => (openListingId ? "listing" : ""));
   const [step, setStep] = useState(0);
 
   const [user, setUser] = useState({ name: "", email: "" });
@@ -1572,6 +1578,23 @@ export default function SideQuest() {
   // ===== MARKETPLACE / CREATOR STUDIO =====
   // Full-screen views rather than modals: both are destinations you browse,
   // and the builder's state stays untouched underneath.
+  if (view === "listing" && openListingId) {
+    return (
+      <>
+        <ListingDetail
+          id={openListingId}
+          account={account}
+          onSignIn={() => setAuthOpen(true)}
+          onClose={() => {
+            // Drop ?listing= so a refresh doesn't bounce back to the detail page.
+            try { window.history.replaceState({}, "", window.location.pathname); } catch (e) { /* ignore */ }
+            setOpenListingId(""); setView("market"); window.scrollTo(0, 0);
+          }}
+        />
+        {authOpen && <AuthModal onClose={() => setAuthOpen(false)} onSubmit={doAuth} />}
+      </>
+    );
+  }
   if (view === "market") {
     return (
       <>
@@ -2021,14 +2044,24 @@ function Stars({ avg, count }) {
   );
 }
 
-function ListingCard({ listing, onOpen }) {
+// Deep link for a listing. Same query-param convention as ?deck= and ?collab=,
+// which means these URLs are shareable and open standalone — a creator can send
+// a buyer straight to the thing they're selling.
+const listingUrl = (id) => `${location.origin}${location.pathname}?listing=${encodeURIComponent(id)}`;
+
+// An anchor, not a button: opening in a new window is what makes middle-click,
+// cmd-click and "copy link address" all behave the way people expect.
+function ListingCard({ listing }) {
   const l = listing;
   return (
-    <button onClick={() => onOpen && onOpen(l)} style={{
-      textAlign: "left", cursor: onOpen ? "pointer" : "default", font: "inherit",
+    <a href={listingUrl(l.id)} target="_blank" rel="noopener noreferrer" style={{
+      textDecoration: "none", font: "inherit",
       background: "rgba(255,255,255,0.025)", border: "1px solid #2c2c36", borderRadius: 16,
       padding: 20, color: "#e8e8f0", display: "flex", flexDirection: "column", gap: 8,
-    }}>
+      transition: "border-color .15s, transform .15s",
+    }}
+      onMouseEnter={(e) => { e.currentTarget.style.borderColor = "#d8b24a66"; e.currentTarget.style.transform = "translateY(-2px)"; }}
+      onMouseLeave={(e) => { e.currentTarget.style.borderColor = "#2c2c36"; e.currentTarget.style.transform = "none"; }}>
       <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
         <span style={{ fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: "#d8b24a", border: "1px solid #d8b24a44", borderRadius: 999, padding: "3px 9px" }}>
           {KIND_LABEL[l.kind] || l.kind}
@@ -2049,7 +2082,107 @@ function ListingCard({ listing, onOpen }) {
           )}
         </div>
       </div>
-    </button>
+    </a>
+  );
+}
+
+// Standalone listing page, reached by ?listing=<id>. Shows the work, who made
+// it, and what else they sell — the three things a buyer needs before deciding.
+function ListingDetail({ id, onClose, account, onSignIn }) {
+  const [data, setData] = useState(null);   // {listing, creator, others}
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { listing } = await api("GET", `/api/mk/listings/${encodeURIComponent(id)}`);
+        // The creator's public page carries their bio and their other listings.
+        let creator = null, others = [];
+        try {
+          const c = await api("GET", `/api/mk/creators/${encodeURIComponent(listing.creatorId)}`);
+          creator = c.creator; others = (c.listings || []).filter((l) => l.id !== listing.id);
+        } catch (e) { /* listing still viewable without the profile */ }
+        if (!cancelled) setData({ listing, creator, others });
+      } catch (e) { if (!cancelled) setErr(e.message); }
+    })();
+    return () => { cancelled = true; };
+  }, [id]);
+
+  const l = data?.listing;
+  const c = data?.creator;
+
+  return (
+    <div style={{ minHeight: "100vh", background: "radial-gradient(1200px 700px at 50% -5%, #2a1d3f 0%, #15121d 45%, #08070d 100%)", color: "#e8e8f0", fontFamily: UI_FONT, paddingBottom: 80 }}>
+      <GlobalCSS />
+      <header style={{ position: "sticky", top: 0, zIndex: 10, backdropFilter: "blur(10px)", background: "rgba(8,7,13,0.72)", borderBottom: "1px solid rgba(216,178,74,0.14)" }}>
+        <div style={{ maxWidth: 900, margin: "0 auto", padding: "14px 24px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+          <div onClick={onClose} style={{ cursor: "pointer", fontFamily: DISPLAY_FONT, fontSize: "clamp(11px,3vw,14px)", letterSpacing: "clamp(2px,1vw,5px)", textTransform: "uppercase", color: "#d8b24a" }}>✦ Side Quest</div>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            {!account && <button onClick={onSignIn} style={navBtn}>Sign in</button>}
+            <GhostButton onClick={onClose} style={{ padding: "8px 16px", fontSize: 13 }}>Browse all</GhostButton>
+          </div>
+        </div>
+      </header>
+
+      <div style={{ maxWidth: 900, margin: "0 auto", padding: "44px 24px 0" }}>
+        {err && <div style={{ background: "rgba(239,91,107,0.12)", border: "1px solid #ef5b6b", color: "#ffc4cb", padding: "12px 16px", borderRadius: 10, fontSize: 14 }}>⚠ {err}</div>}
+        {!data && !err && <div style={{ color: "#6c6c78" }}>Loading…</div>}
+
+        {l && (
+          <>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 14 }}>
+              <span style={{ fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: "#d8b24a", border: "1px solid #d8b24a44", borderRadius: 999, padding: "3px 9px" }}>{KIND_LABEL[l.kind] || l.kind}</span>
+              <span style={{ fontSize: 12, color: "#8a8a98" }}>{l.discipline === "artist" ? "Illustration" : "Adventure lore"}</span>
+            </div>
+            <h1 style={{ fontFamily: DISPLAY_FONT, fontSize: "clamp(26px,4.5vw,40px)", margin: "0 0 14px", lineHeight: 1.15 }}>{l.title}</h1>
+            {l.summary && <p style={{ color: "#b8b8c8", fontSize: 17, lineHeight: 1.6, margin: "0 0 22px", maxWidth: 620 }}>{l.summary}</p>}
+
+            <div style={{ display: "flex", gap: 22, flexWrap: "wrap", alignItems: "center", padding: "20px 0", borderTop: "1px solid #24242e", borderBottom: "1px solid #24242e", marginBottom: 26 }}>
+              <div>
+                <div style={{ fontFamily: DISPLAY_FONT, fontSize: 34, color: "#f3cf5b", lineHeight: 1 }}>{money(l.priceCents, l.currency)}</div>
+                <div style={{ color: "#6c6c78", fontSize: 12, marginTop: 4 }}>
+                  {l.kind === "commission" ? `delivered in ~${l.deliveryDays} days · ${l.revisionsIncluded} revisions included` : "instant download, personalise with your crew"}
+                </div>
+              </div>
+              <div style={{ marginLeft: "auto" }}>
+                {/* Ordering lands with the order lifecycle; showing a dead button
+                    that silently does nothing would be worse than saying so. */}
+                <PrimaryButton disabled style={{ opacity: 0.55 }}>
+                  {l.kind === "commission" ? "Request this commission" : "Buy this"}
+                </PrimaryButton>
+                <div style={{ color: "#6c6c78", fontSize: 12, marginTop: 8, textAlign: "right" }}>Ordering opens soon</div>
+              </div>
+            </div>
+
+            {l.description && (
+              <div style={{ color: "#c8c8d4", fontSize: 15, lineHeight: 1.7, whiteSpace: "pre-wrap", marginBottom: 34 }}>{l.description}</div>
+            )}
+
+            {c && (
+              <div style={{ background: "rgba(255,255,255,0.025)", border: "1px solid #2c2c36", borderRadius: 18, padding: 24 }}>
+                <div style={{ fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#d8b24a", marginBottom: 10 }}>About the creator</div>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "baseline" }}>
+                  <div style={{ fontFamily: DISPLAY_FONT, fontSize: 22 }}>{c.displayName}</div>
+                  <Stars avg={c.ratingAvg} count={c.ratingCount} />
+                </div>
+                {c.headline && <div style={{ color: "#9a9aa8", fontSize: 14, marginTop: 4 }}>{c.headline}</div>}
+                {c.bio && <p style={{ color: "#c8c8d4", fontSize: 14, lineHeight: 1.7, marginTop: 14 }}>{c.bio}</p>}
+
+                {data.others.length > 0 && (
+                  <div style={{ marginTop: 22, paddingTop: 18, borderTop: "1px solid #24242e" }}>
+                    <div style={{ fontFamily: DISPLAY_FONT, fontSize: 17, marginBottom: 12 }}>More from {c.displayName}</div>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(240px,1fr))", gap: 14 }}>
+                      {data.others.map((o) => <ListingCard key={o.id} listing={{ ...o, creator: { displayName: c.displayName, ratingAvg: c.ratingAvg, ratingCount: c.ratingCount } }} />)}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
   );
 }
 
