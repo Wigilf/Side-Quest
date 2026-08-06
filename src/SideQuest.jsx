@@ -417,9 +417,16 @@ async function regenerateOneCard({ eventType, theme, questPrompt, card }) {
 // a procedural backdrop instead — without it a broken key or an exhausted quota
 // looks identical to "the art just renders like that", which hid a real outage.
 async function generateCardArt({ photoBase64, frameAccent, themeStyle, seedStr, lore, refineNote, objectMode, category, onFallback }) {
-  // Portrait mode needs a face photo; object mode (artifacts/spells/NPCs/…) is
-  // text-to-image and needs no photo. Either way, call the backend when live.
-  if (API_BASE && (photoBase64 || objectMode)) {
+  // Two ways to paint a card: from a face photo (portrait mode) or from the
+  // card's own lore (text-to-image). A hero card with no photo used to qualify
+  // for neither and silently got the flat procedural gradient — which reads as
+  // "the art is broken" even though nothing failed and nothing was reported.
+  //
+  // So: ask the backend whenever there is anything to paint from. Without a
+  // photo the server takes its text-to-image path, which is explicitly prompted
+  // to invent an original character rather than depict a real person.
+  const haveSubject = !!(photoBase64 || objectMode || lore?.title || category);
+  if (API_BASE && haveSubject) {
     try {
       const d = await postJSON("/api/generate-art", {
         photoBase64: photoBase64 || undefined,
