@@ -1408,7 +1408,12 @@ export default function SideQuest() {
         lore = await generateDeckLore(src);
         if (!lore || !Array.isArray(lore.cards) || lore.cards.length === 0) throw new Error("empty");
       } catch (loreErr) {
+        // The fallback deck exists so a live demo never dies on stage, but
+        // swapping in canned lore silently is indistinguishable from the AI
+        // simply writing something generic — which hid a real outage (an
+        // exhausted API balance) behind decks that looked merely disappointing.
         console.warn("Live lore failed, using themed fallback deck:", loreErr);
+        setError(`Wrote a generic deck — personalised lore is unavailable right now: ${loreErr.message}`);
         lore = buildFallbackLore(src);
       }
       setQuestCard(lore.questCard);
