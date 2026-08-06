@@ -560,16 +560,18 @@ function PrimaryButton({ children, onClick, disabled, style }) {
   );
 }
 
-function GhostButton({ children, onClick, style }) {
+function GhostButton({ children, onClick, style, disabled }) {
   return (
-    <button onClick={onClick}
+    <button onClick={onClick} disabled={disabled}
       style={{
         fontFamily: UI_FONT, fontSize: 14, padding: "11px 20px", borderRadius: 10,
-        border: "1px solid #4a4a56", cursor: "pointer", color: "#c8c8d4",
+        border: `1px solid ${disabled ? "#33333e" : "#4a4a56"}`,
+        cursor: disabled ? "not-allowed" : "pointer",
+        color: disabled ? "#5a5a66" : "#c8c8d4",
         background: "transparent", transition: "border-color .2s", ...style,
       }}
-      onMouseEnter={(e) => (e.currentTarget.style.borderColor = "#8a8a9a")}
-      onMouseLeave={(e) => (e.currentTarget.style.borderColor = "#4a4a56")}>
+      onMouseEnter={(e) => !disabled && (e.currentTarget.style.borderColor = "#8a8a9a")}
+      onMouseLeave={(e) => !disabled && (e.currentTarget.style.borderColor = "#4a4a56")}>
       {children}
     </button>
   );
@@ -1069,6 +1071,7 @@ export default function SideQuest() {
   const [landing, setLanding] = useState(true);
   const [account, setAccount] = useState(null);   // {id,email,displayName} once signed in
   const [authOpen, setAuthOpen] = useState(false);
+  const [view, setView] = useState("");           // "" | "market" | "studio"
   const [step, setStep] = useState(0);
 
   const [user, setUser] = useState({ name: "", email: "" });
@@ -1566,6 +1569,35 @@ export default function SideQuest() {
        (!participants.some((p) => p.photo) || photoConsent),
   };
 
+  // ===== MARKETPLACE / CREATOR STUDIO =====
+  // Full-screen views rather than modals: both are destinations you browse,
+  // and the builder's state stays untouched underneath.
+  if (view === "market") {
+    return (
+      <>
+        <Marketplace
+          account={account}
+          onClose={() => { setView(""); window.scrollTo(0, 0); }}
+          onSignIn={() => setAuthOpen(true)}
+          onBecomeCreator={() => { setView("studio"); window.scrollTo(0, 0); }}
+        />
+        {authOpen && <AuthModal onClose={() => setAuthOpen(false)} onSubmit={doAuth} />}
+      </>
+    );
+  }
+  if (view === "studio") {
+    return (
+      <>
+        <CreatorStudio
+          account={account}
+          onClose={() => { setView("market"); window.scrollTo(0, 0); }}
+          onSignIn={() => setAuthOpen(true)}
+        />
+        {authOpen && <AuthModal onClose={() => setAuthOpen(false)} onSubmit={doAuth} />}
+      </>
+    );
+  }
+
   // ===== LANDING =====
   if (landing) {
     return (
@@ -1581,6 +1613,7 @@ export default function SideQuest() {
           account={account}
           onSignIn={() => setAuthOpen(true)}
           onSignOut={signOut}
+          onMarket={() => { setView("market"); window.scrollTo(0, 0); }}
         />
         {authOpen && <AuthModal onClose={() => setAuthOpen(false)} onSubmit={doAuth} />}
       </>
@@ -1598,6 +1631,7 @@ export default function SideQuest() {
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" }}>
           <button onClick={newDeck} style={navBtn}>＋ New</button>
           <button onClick={() => setShowDecks(true)} style={navBtn}>◈ My decks{savedDecks.length ? ` (${savedDecks.length})` : ""}</button>
+          <button onClick={() => { setView("market"); window.scrollTo(0, 0); }} style={navBtn}>✦ Marketplace</button>
           <AccountButton account={account} onSignIn={() => setAuthOpen(true)} onSignOut={signOut} />
         </div>
       </div>
@@ -1963,6 +1997,321 @@ function AccountButton({ account, onSignIn, onSignOut }) {
 }
 
 // ---------------------------------------------------------------------------
+// MARKETPLACE
+// ---------------------------------------------------------------------------
+// Browse is curation-led rather than search-led: approved creators only, and
+// no rank-by-volume. Two disciplines sell here — artists deliver illustration,
+// writers deliver adventure lore — and each sells ready-made catalog items or
+// bespoke commissions.
+
+const DISCIPLINE_LABEL = { artist: "Artists", writer: "Lore writers" };
+const KIND_LABEL = { catalog: "Ready-made", commission: "Commission" };
+
+function money(cents, currency = "usd") {
+  const sym = currency === "usd" ? "$" : "";
+  return `${sym}${(cents / 100).toFixed(cents % 100 ? 2 : 0)}`;
+}
+
+function Stars({ avg, count }) {
+  if (!count) return <span style={{ color: "#6c6c78", fontSize: 12 }}>No reviews yet</span>;
+  return (
+    <span style={{ color: "#d8b24a", fontSize: 12 }}>
+      ★ {Number(avg).toFixed(1)} <span style={{ color: "#6c6c78" }}>({count})</span>
+    </span>
+  );
+}
+
+function ListingCard({ listing, onOpen }) {
+  const l = listing;
+  return (
+    <button onClick={() => onOpen && onOpen(l)} style={{
+      textAlign: "left", cursor: onOpen ? "pointer" : "default", font: "inherit",
+      background: "rgba(255,255,255,0.025)", border: "1px solid #2c2c36", borderRadius: 16,
+      padding: 20, color: "#e8e8f0", display: "flex", flexDirection: "column", gap: 8,
+    }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <span style={{ fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: "#d8b24a", border: "1px solid #d8b24a44", borderRadius: 999, padding: "3px 9px" }}>
+          {KIND_LABEL[l.kind] || l.kind}
+        </span>
+        <span style={{ fontSize: 11, color: "#8a8a98" }}>{l.discipline === "artist" ? "Art" : "Lore"}</span>
+      </div>
+      <div style={{ fontFamily: DISPLAY_FONT, fontSize: 19, lineHeight: 1.25 }}>{l.title}</div>
+      {l.summary && <div style={{ color: "#9a9aa8", fontSize: 14, lineHeight: 1.55 }}>{l.summary}</div>}
+      <div style={{ marginTop: "auto", paddingTop: 10, display: "flex", justifyContent: "space-between", alignItems: "flex-end", gap: 10 }}>
+        <div>
+          <div style={{ color: "#cfcfda", fontSize: 13 }}>{l.creator?.displayName}</div>
+          <Stars avg={l.creator?.ratingAvg} count={l.creator?.ratingCount || 0} />
+        </div>
+        <div style={{ textAlign: "right" }}>
+          <div style={{ fontFamily: DISPLAY_FONT, fontSize: 22, color: "#f3cf5b" }}>{money(l.priceCents, l.currency)}</div>
+          {l.kind === "commission" && l.deliveryDays && (
+            <div style={{ color: "#6c6c78", fontSize: 12 }}>~{l.deliveryDays} days</div>
+          )}
+        </div>
+      </div>
+    </button>
+  );
+}
+
+function Marketplace({ onClose, account, onSignIn, onBecomeCreator }) {
+  const [discipline, setDiscipline] = useState("");
+  const [kind, setKind] = useState("");
+  const [listings, setListings] = useState(null);   // null = loading
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    setListings(null); setErr("");
+    (async () => {
+      try {
+        const qs = new URLSearchParams();
+        if (discipline) qs.set("discipline", discipline);
+        if (kind) qs.set("kind", kind);
+        const d = await api("GET", `/api/mk/listings${qs.toString() ? "?" + qs : ""}`);
+        if (!cancelled) setListings(d.listings || []);
+      } catch (e) { if (!cancelled) { setErr(e.message); setListings([]); } }
+    })();
+    return () => { cancelled = true; };
+  }, [discipline, kind]);
+
+  const Filter = ({ value, current, set, children }) => (
+    <button onClick={() => set(current === value ? "" : value)} style={{
+      ...navBtn, cursor: "pointer",
+      borderColor: current === value ? "#d8b24a" : "#3a3a46",
+      color: current === value ? "#f3cf5b" : "#c8c8d4",
+    }}>{children}</button>
+  );
+
+  return (
+    <div style={{ minHeight: "100vh", background: "radial-gradient(1200px 700px at 50% -5%, #2a1d3f 0%, #15121d 45%, #08070d 100%)", color: "#e8e8f0", fontFamily: UI_FONT, paddingBottom: 80 }}>
+      <GlobalCSS />
+      <header style={{ position: "sticky", top: 0, zIndex: 10, backdropFilter: "blur(10px)", background: "rgba(8,7,13,0.72)", borderBottom: "1px solid rgba(216,178,74,0.14)" }}>
+        <div style={{ maxWidth: 1040, margin: "0 auto", padding: "14px 24px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+          <div onClick={onClose} style={{ cursor: "pointer", fontFamily: DISPLAY_FONT, fontSize: "clamp(11px,3vw,14px)", letterSpacing: "clamp(2px,1vw,5px)", textTransform: "uppercase", color: "#d8b24a", whiteSpace: "nowrap" }}>✦ Side Quest</div>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <button onClick={onBecomeCreator} style={navBtn}>Sell your work</button>
+            {!account && <button onClick={onSignIn} style={navBtn}>Sign in</button>}
+            <GhostButton onClick={onClose} style={{ padding: "8px 16px", fontSize: 13 }}>← Back to builder</GhostButton>
+          </div>
+        </div>
+      </header>
+
+      <div style={{ maxWidth: 1040, margin: "0 auto", padding: "48px 24px 0" }}>
+        <div style={{ fontFamily: UI_FONT, fontSize: 12, letterSpacing: 3, textTransform: "uppercase", color: "#d8b24a", marginBottom: 12 }}>Marketplace</div>
+        <h1 style={{ fontFamily: DISPLAY_FONT, fontSize: "clamp(28px,5vw,46px)", margin: "0 0 12px" }}>Hire a human</h1>
+        <p style={{ color: "#9a9aa8", fontSize: 16, lineHeight: 1.6, maxWidth: 620, margin: "0 0 32px" }}>
+          Commission original illustration or a bespoke adventure from invited creators — or buy something
+          ready-made and personalise it with your own crew. Every creator here is hand-picked.
+        </p>
+
+        <div style={{ display: "flex", gap: 9, flexWrap: "wrap", marginBottom: 30 }}>
+          <Filter value="artist" current={discipline} set={setDiscipline}>Art</Filter>
+          <Filter value="writer" current={discipline} set={setDiscipline}>Lore</Filter>
+          <span style={{ width: 1, background: "#2c2c36", margin: "0 5px" }} />
+          <Filter value="catalog" current={kind} set={setKind}>Ready-made</Filter>
+          <Filter value="commission" current={kind} set={setKind}>Commission</Filter>
+        </div>
+
+        {err && <div style={{ background: "rgba(239,91,107,0.12)", border: "1px solid #ef5b6b", color: "#ffc4cb", padding: "12px 16px", borderRadius: 10, marginBottom: 20, fontSize: 14 }}>⚠ {err}</div>}
+
+        {listings === null ? (
+          <div style={{ color: "#6c6c78", padding: "40px 0" }}>Loading…</div>
+        ) : listings.length === 0 ? (
+          <div style={{ border: "1px dashed #33333e", borderRadius: 16, padding: "48px 24px", textAlign: "center" }}>
+            <div style={{ fontFamily: DISPLAY_FONT, fontSize: 20, marginBottom: 8 }}>No listings yet</div>
+            <div style={{ color: "#9a9aa8", fontSize: 14, lineHeight: 1.6, maxWidth: 460, margin: "0 auto" }}>
+              The roster is invite-only and still being assembled. If you illustrate or write,
+              apply and we'll take a look.
+            </div>
+            <GhostButton onClick={onBecomeCreator} style={{ marginTop: 20 }}>Apply as a creator</GhostButton>
+          </div>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))", gap: 18 }}>
+            {listings.map((l) => <ListingCard key={l.id} listing={l} />)}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Creator-side: apply, then manage listings. Deliberately plain — this is a
+// working surface for a small invited roster, not a storefront builder.
+function CreatorStudio({ onClose, account, onSignIn }) {
+  const [creators, setCreators] = useState(null);
+  const [listings, setListings] = useState([]);
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [form, setForm] = useState({ discipline: "artist", displayName: "", headline: "" });
+  // Delivery days defaults rather than starting empty: it is required for a
+  // commission, and Number("") is 0, which the server rightly rejects — so an
+  // empty field turned a missing default into a validation error.
+  const BLANK_LISTING = { kind: "commission", title: "", summary: "", priceCents: "", deliveryDays: "14" };
+  const [lf, setLf] = useState(BLANK_LISTING);
+
+  // Say what's missing before submitting, rather than round-tripping to find out.
+  const priceNum = Number(lf.priceCents);
+  const daysNum = Number(lf.deliveryDays);
+  const listingProblem =
+    !lf.title.trim() ? "Give the listing a title"
+    : !Number.isFinite(priceNum) || priceNum < 15 ? "Price must be at least $15"
+    : lf.kind === "commission" && !(Number.isFinite(daysNum) && daysNum >= 1 && daysNum <= 365)
+      ? "Commissions need a delivery time, in days (1–365)"
+      : "";
+
+  async function load() {
+    try {
+      const [c, l] = await Promise.all([
+        api("GET", "/api/mk/creators/me"),
+        api("GET", "/api/mk/listings/mine"),
+      ]);
+      setCreators(c.creators || []); setListings(l.listings || []);
+    } catch (e) { setErr(e.message); setCreators([]); }
+  }
+  useEffect(() => { if (account) load(); else setCreators([]); /* eslint-disable-next-line */ }, [account]);
+
+  async function apply(e) {
+    e.preventDefault(); setBusy(true); setErr("");
+    try { await api("POST", "/api/mk/creators", form); await load(); }
+    catch (e2) { setErr(e2.message); }
+    setBusy(false);
+  }
+
+  async function createListing(e, creator) {
+    e.preventDefault(); setBusy(true); setErr("");
+    try {
+      await api("POST", "/api/mk/listings", {
+        creatorId: creator.id, kind: lf.kind, title: lf.title, summary: lf.summary,
+        priceCents: Math.round(Number(lf.priceCents) * 100),
+        ...(lf.kind === "commission" ? { deliveryDays: Number(lf.deliveryDays) } : {}),
+      });
+      setLf(BLANK_LISTING);
+      await load();
+    } catch (e2) { setErr(e2.message); }
+    setBusy(false);
+  }
+
+  async function setStatus(listing, status) {
+    setErr("");
+    try { await api("PATCH", `/api/mk/listings/${listing.id}`, { status }); await load(); }
+    catch (e) { setErr(e.message); }
+  }
+
+  return (
+    <div style={{ minHeight: "100vh", background: "radial-gradient(1200px 700px at 50% -5%, #2a1d3f 0%, #15121d 45%, #08070d 100%)", color: "#e8e8f0", fontFamily: UI_FONT, paddingBottom: 80 }}>
+      <GlobalCSS />
+      <header style={{ position: "sticky", top: 0, zIndex: 10, backdropFilter: "blur(10px)", background: "rgba(8,7,13,0.72)", borderBottom: "1px solid rgba(216,178,74,0.14)" }}>
+        <div style={{ maxWidth: 900, margin: "0 auto", padding: "14px 24px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+          <div style={{ fontFamily: DISPLAY_FONT, fontSize: "clamp(11px,3vw,14px)", letterSpacing: "clamp(2px,1vw,5px)", textTransform: "uppercase", color: "#d8b24a" }}>✦ Creator studio</div>
+          <GhostButton onClick={onClose} style={{ padding: "8px 16px", fontSize: 13 }}>← Back</GhostButton>
+        </div>
+      </header>
+
+      <div style={{ maxWidth: 900, margin: "0 auto", padding: "44px 24px 0" }}>
+        {err && <div style={{ background: "rgba(239,91,107,0.12)", border: "1px solid #ef5b6b", color: "#ffc4cb", padding: "12px 16px", borderRadius: 10, marginBottom: 20, fontSize: 14 }}>⚠ {err}</div>}
+
+        {!account ? (
+          <div style={{ border: "1px dashed #33333e", borderRadius: 16, padding: "48px 24px", textAlign: "center" }}>
+            <div style={{ fontFamily: DISPLAY_FONT, fontSize: 22, marginBottom: 10 }}>Sign in to apply</div>
+            <p style={{ color: "#9a9aa8", fontSize: 14, maxWidth: 420, margin: "0 auto 20px", lineHeight: 1.6 }}>
+              Selling needs an account so we can attribute work and pay you.
+            </p>
+            <PrimaryButton onClick={onSignIn}>Sign in</PrimaryButton>
+          </div>
+        ) : creators === null ? (
+          <div style={{ color: "#6c6c78" }}>Loading…</div>
+        ) : (
+          <>
+            {creators.length === 0 && (
+              <form onSubmit={apply} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid #2c2c36", borderRadius: 18, padding: 26, marginBottom: 26 }}>
+                <h2 style={{ fontFamily: DISPLAY_FONT, fontSize: 24, margin: "0 0 6px" }}>Apply to sell</h2>
+                <p style={{ color: "#9a9aa8", fontSize: 14, margin: "0 0 20px", lineHeight: 1.6 }}>
+                  The roster is invite-only — applications are reviewed by hand. You can sell art, lore, or both.
+                </p>
+                <div style={{ display: "flex", gap: 9, marginBottom: 14, flexWrap: "wrap" }}>
+                  {["artist", "writer"].map((d) => (
+                    <button key={d} type="button" onClick={() => setForm({ ...form, discipline: d })} style={{
+                      ...navBtn, borderColor: form.discipline === d ? "#d8b24a" : "#3a3a46",
+                      color: form.discipline === d ? "#f3cf5b" : "#c8c8d4",
+                    }}>{d === "artist" ? "I illustrate" : "I write adventures"}</button>
+                  ))}
+                </div>
+                <input value={form.displayName} onChange={(e) => setForm({ ...form, displayName: e.target.value })}
+                  placeholder="Name buyers will see" style={{ ...inputStyle, marginBottom: 10 }} />
+                <input value={form.headline} onChange={(e) => setForm({ ...form, headline: e.target.value })}
+                  placeholder="One line about your work" style={{ ...inputStyle, marginBottom: 16 }} />
+                <PrimaryButton onClick={apply} disabled={busy || !form.displayName.trim()}>Apply</PrimaryButton>
+              </form>
+            )}
+
+            {creators.map((c) => (
+              <div key={c.id} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid #2c2c36", borderRadius: 18, padding: 26, marginBottom: 22 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 6 }}>
+                  <h2 style={{ fontFamily: DISPLAY_FONT, fontSize: 22, margin: 0 }}>{c.displayName}</h2>
+                  <span style={{
+                    fontSize: 11, letterSpacing: 1, textTransform: "uppercase", padding: "4px 10px", borderRadius: 999,
+                    border: `1px solid ${c.status === "approved" ? "#4ade8055" : "#d8b24a55"}`,
+                    color: c.status === "approved" ? "#4ade80" : "#d8b24a",
+                  }}>{c.status}</span>
+                </div>
+                <div style={{ color: "#9a9aa8", fontSize: 14, marginBottom: 4 }}>{DISCIPLINE_LABEL[c.discipline]} · {c.headline || "—"}</div>
+                {c.status !== "approved" && (
+                  <div style={{ color: "#8a8a98", fontSize: 13, lineHeight: 1.6, marginTop: 10, paddingTop: 12, borderTop: "1px solid #24242e" }}>
+                    You can draft listings now. Publishing unlocks once your application is approved.
+                  </div>
+                )}
+
+                <div style={{ marginTop: 20, paddingTop: 18, borderTop: "1px solid #24242e" }}>
+                  <div style={{ fontFamily: DISPLAY_FONT, fontSize: 17, marginBottom: 12 }}>Your listings</div>
+                  {listings.filter((l) => l.creatorId === c.id).map((l) => (
+                    <div key={l.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap", padding: "12px 0", borderBottom: "1px solid #1e1e28" }}>
+                      <div>
+                        <div style={{ fontSize: 15 }}>{l.title}</div>
+                        <div style={{ color: "#6c6c78", fontSize: 12 }}>
+                          {KIND_LABEL[l.kind]} · {money(l.priceCents)} · {l.status}
+                          {l.kind === "commission" && l.deliveryDays ? ` · ${l.deliveryDays}d` : ""}
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", gap: 8 }}>
+                        {l.status !== "published" && <button onClick={() => setStatus(l, "published")} style={navBtn}>Publish</button>}
+                        {l.status === "published" && <button onClick={() => setStatus(l, "paused")} style={navBtn}>Pause</button>}
+                      </div>
+                    </div>
+                  ))}
+
+                  <form onSubmit={(e) => createListing(e, c)} style={{ marginTop: 18 }}>
+                    <div style={{ display: "flex", gap: 9, marginBottom: 10, flexWrap: "wrap" }}>
+                      {["commission", "catalog"].map((k) => (
+                        <button key={k} type="button" onClick={() => setLf({ ...lf, kind: k })} style={{
+                          ...navBtn, borderColor: lf.kind === k ? "#d8b24a" : "#3a3a46",
+                          color: lf.kind === k ? "#f3cf5b" : "#c8c8d4",
+                        }}>{KIND_LABEL[k]}</button>
+                      ))}
+                    </div>
+                    <input value={lf.title} onChange={(e) => setLf({ ...lf, title: e.target.value })} placeholder="Listing title" style={{ ...inputStyle, marginBottom: 8 }} />
+                    <input value={lf.summary} onChange={(e) => setLf({ ...lf, summary: e.target.value })} placeholder="One line describing it" style={{ ...inputStyle, marginBottom: 8 }} />
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                      <input value={lf.priceCents} onChange={(e) => setLf({ ...lf, priceCents: e.target.value })} inputMode="decimal" placeholder="Price in $ (min 15)" style={{ ...inputStyle, flex: "1 1 150px" }} />
+                      {lf.kind === "commission" && (
+                        <input value={lf.deliveryDays} onChange={(e) => setLf({ ...lf, deliveryDays: e.target.value })} inputMode="numeric" placeholder="Delivery days (required)" style={{ ...inputStyle, flex: "1 1 130px" }} />
+                      )}
+                    </div>
+                    <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginTop: 10 }}>
+                      <GhostButton onClick={(e) => createListing(e, c)} disabled={!!listingProblem || busy}>Add listing</GhostButton>
+                      {listingProblem && <span style={{ color: "#8a8a98", fontSize: 13 }}>{listingProblem}</span>}
+                    </div>
+                  </form>
+                </div>
+              </div>
+            ))}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // LANDING PAGE
 // ---------------------------------------------------------------------------
 // Explains the product to someone who has never seen it. The builder itself is
@@ -1997,7 +2346,7 @@ function LandingSection({ eyebrow, title, sub, children, style }) {
   );
 }
 
-function Landing({ onOpen, onDemo, savedCount, onDecks, banner, account, onSignIn, onSignOut }) {
+function Landing({ onOpen, onDemo, savedCount, onDecks, banner, account, onSignIn, onSignOut, onMarket }) {
   return (
     <div style={{ minHeight: "100vh", background: "radial-gradient(1200px 700px at 50% -5%, #2a1d3f 0%, #15121d 45%, #08070d 100%)", color: "#e8e8f0", fontFamily: UI_FONT }}>
       <GlobalCSS />
@@ -2014,6 +2363,7 @@ function Landing({ onOpen, onDemo, savedCount, onDecks, banner, account, onSignI
             {savedCount > 0 && (
               <button onClick={onDecks} style={{ ...navBtn, whiteSpace: "nowrap" }}>◈ My decks ({savedCount})</button>
             )}
+            <button onClick={onMarket} style={{ ...navBtn, whiteSpace: "nowrap" }}>✦ Marketplace</button>
             <AccountButton account={account} onSignIn={onSignIn} onSignOut={onSignOut} />
             <PrimaryButton onClick={onOpen} style={{ whiteSpace: "nowrap" }}>Open the app →</PrimaryButton>
           </div>
