@@ -19,6 +19,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { query, migrate, dbEnabled } from "./db.mjs";
+import { r2Enabled, r2Config, r2Check, r2Put, artKey } from "./r2.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -675,9 +676,28 @@ async function callGeminiImage(parts) {
   const outMime = inline.mime_type || inline.mimeType || "image/png";
   const raw = Buffer.from(inline.data, "base64");
   const small = await shrinkArt(raw);
-  if (!small) return `data:${outMime};base64,${inline.data}`;
-  console.log(`art re-encoded: ${(raw.length / 1024).toFixed(0)}KB -> ${(small.buf.length / 1024).toFixed(0)}KB ${small.mime}`);
-  return `data:${small.mime};base64,${small.buf.toString("base64")}`;
+  const bytes = small ? small.buf : raw;
+  const mime = small ? small.mime : outMime;
+  if (small) console.log(`art re-encoded: ${(raw.length / 1024).toFixed(0)}KB -> ${(bytes.length / 1024).toFixed(0)}KB ${mime}`);
+
+  // With object storage configured, hand back a URL instead of a data URL.
+  // This is what keeps images out of sq_decks.payload: the deck stores a ~90
+  // character link rather than ~250,000 characters of base64, which is the
+  // difference between a 12MB deck and a 3KB one.
+  //
+  // Falling back to a data URL when R2 is unavailable is deliberate: art
+  // generation is the product, and it should not fail because a bucket is
+  // misconfigured. The deck is merely large, as it was before.
+  if (r2Enabled()) {
+    try {
+      const ext = mime === "image/webp" ? "webp" : mime === "image/png" ? "png" : "jpg";
+      const url = await r2Put(artKey(bytes, ext), bytes, mime);
+      return url;
+    } catch (e) {
+      console.warn("R2 upload failed, falling back to inline data URL:", e.message);
+    }
+  }
+  return `data:${mime};base64,${bytes.toString("base64")}`;
 }
 
 // Character portrait from a real face (photoDataUrl: "data:image/jpeg;base64,…").
@@ -1023,6 +1043,15 @@ const routes = {
     stripe: stripeKeyInfo().configured,
     stripeMode: stripeKeyInfo().mode,
     ...(stripeKeyInfo().malformed ? { stripeKeyMalformed: true } : {}),
+    // Actually signs a request against the bucket rather than checking that
+    // five strings are non-empty — "the value is set" is what made the bad
+    // Stripe key look healthy for an hour.
+    r2: await (async () => {
+      const c = r2Config();
+      if (!c.configured) return { ok: false, missing: c.missing };
+      const chk = await r2Check();
+      return { ok: chk.ok, ...(chk.ok ? {} : { reason: chk.reason }), ...(c.publicLooksLikeApi ? { publicUrlIsApiEndpoint: true } : {}) };
+    })(),
     db: dbEnabled(),
     model: ANTHROPIC_MODEL,
     imageModel: GEMINI_IMAGE_MODEL,
