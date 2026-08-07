@@ -1585,12 +1585,34 @@ export default function SideQuest() {
           id={openListingId}
           account={account}
           onSignIn={() => setAuthOpen(true)}
+          onOrdered={() => {
+            try { window.history.replaceState({}, "", window.location.pathname); } catch (e) { /* ignore */ }
+            setOpenListingId(""); setView("orders"); window.scrollTo(0, 0);
+          }}
           onClose={() => {
             // Drop ?listing= so a refresh doesn't bounce back to the detail page.
             try { window.history.replaceState({}, "", window.location.pathname); } catch (e) { /* ignore */ }
             setOpenListingId(""); setView("market"); window.scrollTo(0, 0);
           }}
         />
+        {authOpen && <AuthModal onClose={() => setAuthOpen(false)} onSubmit={doAuth} />}
+      </>
+    );
+  }
+  if (view === "orders") {
+    return (
+      <>
+        <OrdersView account={account} onSignIn={() => setAuthOpen(true)}
+          onClose={() => { setView("market"); window.scrollTo(0, 0); }} />
+        {authOpen && <AuthModal onClose={() => setAuthOpen(false)} onSubmit={doAuth} />}
+      </>
+    );
+  }
+  if (view === "work") {
+    return (
+      <>
+        <WorkView account={account} onSignIn={() => setAuthOpen(true)}
+          onClose={() => { setView("studio"); window.scrollTo(0, 0); }} />
         {authOpen && <AuthModal onClose={() => setAuthOpen(false)} onSubmit={doAuth} />}
       </>
     );
@@ -1603,6 +1625,7 @@ export default function SideQuest() {
           onClose={() => { setView(""); window.scrollTo(0, 0); }}
           onSignIn={() => setAuthOpen(true)}
           onBecomeCreator={() => { setView("studio"); window.scrollTo(0, 0); }}
+          onOrders={() => { setView("orders"); window.scrollTo(0, 0); }}
         />
         {authOpen && <AuthModal onClose={() => setAuthOpen(false)} onSubmit={doAuth} />}
       </>
@@ -1615,6 +1638,7 @@ export default function SideQuest() {
           account={account}
           onClose={() => { setView("market"); window.scrollTo(0, 0); }}
           onSignIn={() => setAuthOpen(true)}
+          onWork={() => { setView("work"); window.scrollTo(0, 0); }}
         />
         {authOpen && <AuthModal onClose={() => setAuthOpen(false)} onSubmit={doAuth} />}
       </>
@@ -2020,6 +2044,361 @@ function AccountButton({ account, onSignIn, onSignOut }) {
 }
 
 // ---------------------------------------------------------------------------
+// MARKETPLACE: ORDERS, DELIVERY & CHAT
+// ---------------------------------------------------------------------------
+
+const ITEM_STATUS_LABEL = {
+  pending: "Awaiting creator",
+  accepted_by_creator: "Accepted — not started",
+  in_progress: "In progress",
+  delivered: "Delivered — your review",
+  revision_requested: "Revision requested",
+  accepted: "Complete",
+  declined: "Declined",
+  cancelled: "Cancelled",
+  disputed: "Disputed — with support",
+};
+const ITEM_STATUS_COLOR = {
+  delivered: "#f3cf5b", accepted: "#4ade80", disputed: "#ef5b6b",
+  declined: "#ef5b6b", cancelled: "#6c6c78",
+};
+
+function StatusPill({ status }) {
+  const c = ITEM_STATUS_COLOR[status] || "#8a8a98";
+  return (
+    <span style={{ fontSize: 11, letterSpacing: 0.6, textTransform: "uppercase", padding: "4px 10px",
+      borderRadius: 999, border: `1px solid ${c}55`, color: c, whiteSpace: "nowrap" }}>
+      {ITEM_STATUS_LABEL[status] || status}
+    </span>
+  );
+}
+
+// Upload straight to object storage: ask the server to presign, PUT the bytes
+// to storage directly, then hand the resulting URL back. The file never passes
+// through our server, which is the whole point of presigning.
+async function uploadAttachment(itemId, file) {
+  const pre = await api("POST", `/api/mk/items/${itemId}/attachments`, {
+    contentType: file.type, sizeBytes: file.size,
+  });
+  const put = await fetch(pre.uploadUrl, {
+    method: "PUT",
+    headers: { "Content-Type": pre.contentType }, // must match what was signed
+    body: file,
+  });
+  if (!put.ok) throw new Error(`Upload failed (${put.status})`);
+  return { url: pre.publicUrl, name: file.name, contentType: pre.contentType };
+}
+
+function ChatThread({ itemId, account }) {
+  const [messages, setMessages] = useState([]);
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const fileRef = useRef(null);
+  const endRef = useRef(null);
+
+  async function load() {
+    try { const d = await api("GET", `/api/mk/items/${itemId}/messages`); setMessages(d.messages || []); }
+    catch (e) { /* transient */ }
+  }
+  // Poll rather than socket — same cadence as the collab poll already in the app.
+  useEffect(() => {
+    load();
+    const iv = setInterval(load, 5000);
+    return () => clearInterval(iv);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [itemId]);
+  useEffect(() => { endRef.current?.scrollIntoView({ block: "nearest" }); }, [messages.length]);
+
+  async function send(attachments) {
+    const body = text.trim();
+    if (!body && !attachments) return;
+    setBusy(true); setErr("");
+    try {
+      await api("POST", `/api/mk/items/${itemId}/messages`, { body, attachments: attachments || [] });
+      setText(""); await load();
+    } catch (e) { setErr(e.message); }
+    setBusy(false);
+  }
+
+  async function onPickFile(e) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setBusy(true); setErr("");
+    try { await send([await uploadAttachment(itemId, file)]); }
+    catch (e2) { setErr(e2.message); setBusy(false); }
+  }
+
+  return (
+    <div style={{ border: "1px solid #2c2c36", borderRadius: 14, background: "rgba(255,255,255,0.02)" }}>
+      <div style={{ padding: "10px 14px", borderBottom: "1px solid #24242e", fontSize: 12, letterSpacing: 1.5, textTransform: "uppercase", color: "#8a8a98" }}>
+        Messages
+      </div>
+      <div style={{ maxHeight: 300, overflowY: "auto", padding: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+        {messages.length === 0 && <div style={{ color: "#6c6c78", fontSize: 13 }}>No messages yet — say hello.</div>}
+        {messages.map((m) => {
+          const mine = m.senderId === account?.id;
+          return (
+            <div key={m.id} style={{ alignSelf: mine ? "flex-end" : "flex-start", maxWidth: "82%" }}>
+              <div style={{ fontSize: 11, color: "#6c6c78", marginBottom: 3, textAlign: mine ? "right" : "left" }}>
+                {mine ? "You" : (m.senderName || "Them")}
+              </div>
+              <div style={{ background: mine ? "rgba(216,178,74,0.12)" : "rgba(255,255,255,0.05)",
+                border: `1px solid ${mine ? "#d8b24a44" : "#33333e"}`, borderRadius: 12, padding: "9px 12px",
+                fontSize: 14, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
+                {m.body}
+                {(m.attachments || []).map((a, i) => (
+                  <a key={i} href={a.url} target="_blank" rel="noopener noreferrer" style={{ display: "block", marginTop: 8 }}>
+                    <img src={a.url} alt={a.name} style={{ maxWidth: "100%", maxHeight: 220, borderRadius: 8, border: "1px solid #33333e", display: "block" }} />
+                  </a>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+        <div ref={endRef} />
+      </div>
+      {err && <div style={{ color: "#ffc4cb", fontSize: 13, padding: "0 14px 8px" }}>⚠ {err}</div>}
+      <div style={{ display: "flex", gap: 8, padding: 12, borderTop: "1px solid #24242e" }}>
+        <input value={text} onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+          placeholder="Write a message…" style={{ ...inputStyle, marginBottom: 0, flex: 1 }} />
+        <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={onPickFile} style={{ display: "none" }} />
+        <GhostButton onClick={() => fileRef.current?.click()} disabled={busy} style={{ padding: "11px 14px" }}>📎</GhostButton>
+        <PrimaryButton onClick={() => send()} disabled={busy || !text.trim()}>Send</PrimaryButton>
+      </div>
+    </div>
+  );
+}
+
+// One order item, with the actions appropriate to whoever is looking at it.
+// The server enforces all of this too — the UI only avoids offering moves that
+// would be refused.
+function ItemPanel({ item, role, account, onChanged }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [note, setNote] = useState("");
+  const [delivering, setDelivering] = useState(false);
+  const [files, setFiles] = useState([]);
+  const fileRef = useRef(null);
+
+  async function act(action, payload) {
+    setBusy(true); setErr("");
+    try { await api("POST", `/api/mk/items/${item.id}/${action}`, payload || {}); setNote(""); await onChanged(); }
+    catch (e) { setErr(e.message); }
+    setBusy(false);
+  }
+
+  async function addDeliveryFile(e) {
+    const f = e.target.files?.[0]; e.target.value = "";
+    if (!f) return;
+    setBusy(true); setErr("");
+    // Upload first, then update state — the updater callback isn't async.
+    try {
+      const uploaded = await uploadAttachment(item.id, f);
+      setFiles((s) => [...s, uploaded]);
+    } catch (e2) { setErr(e2.message); }
+    setBusy(false);
+  }
+
+  async function submitDelivery() {
+    setBusy(true); setErr("");
+    try {
+      await api("POST", `/api/mk/items/${item.id}/deliverables`, { kind: "files", files, note });
+      setFiles([]); setNote(""); setDelivering(false); await onChanged();
+    } catch (e) { setErr(e.message); }
+    setBusy(false);
+  }
+
+  const isCreator = role === "creator";
+  const revisionsLeft = item.revisionsIncluded - item.revisionsUsed;
+
+  return (
+    <div style={{ background: "rgba(255,255,255,0.025)", border: "1px solid #2c2c36", borderRadius: 16, padding: 20, marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "baseline" }}>
+        <div>
+          <div style={{ fontFamily: DISPLAY_FONT, fontSize: 19 }}>{item.title}</div>
+          <div style={{ color: "#8a8a98", fontSize: 13, marginTop: 3 }}>
+            {item.discipline === "artist" ? "Illustration" : "Adventure lore"} · {money(item.priceCents)}
+            {isCreator && ` · you earn ${money(item.creatorEarningsCents)}`}
+            {item.creator && !isCreator && ` · ${item.creator.displayName}`}
+          </div>
+        </div>
+        <StatusPill status={item.status} />
+      </div>
+
+      {item.brief && (
+        <div style={{ marginTop: 14, padding: 12, borderRadius: 10, background: "rgba(0,0,0,0.25)", border: "1px solid #24242e" }}>
+          <div style={{ fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: "#8a8a98", marginBottom: 5 }}>Brief</div>
+          <div style={{ fontSize: 14, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{item.brief}</div>
+        </div>
+      )}
+
+      {err && <div style={{ background: "rgba(239,91,107,0.12)", border: "1px solid #ef5b6b", color: "#ffc4cb", padding: "9px 12px", borderRadius: 8, fontSize: 13, marginTop: 12 }}>⚠ {err}</div>}
+
+      <div style={{ display: "flex", gap: 9, flexWrap: "wrap", marginTop: 16 }}>
+        {isCreator && item.status === "pending" && (<>
+          <PrimaryButton onClick={() => act("accept")} disabled={busy}>Accept this job</PrimaryButton>
+          <GhostButton onClick={() => act("decline")} disabled={busy}>Decline</GhostButton>
+        </>)}
+        {isCreator && ["accepted_by_creator", "in_progress", "revision_requested"].includes(item.status) && !delivering && (
+          <PrimaryButton onClick={() => setDelivering(true)} disabled={busy}>Deliver work</PrimaryButton>
+        )}
+        {!isCreator && item.status === "delivered" && (<>
+          <PrimaryButton onClick={() => act("accept_delivery")} disabled={busy}>Accept delivery</PrimaryButton>
+          <GhostButton onClick={() => act("request_revision", { note })} disabled={busy || revisionsLeft <= 0}>
+            Request revision{revisionsLeft > 0 ? ` (${revisionsLeft} left)` : " — none left"}
+          </GhostButton>
+          <GhostButton onClick={() => act("dispute", { reason: note })} disabled={busy}>Raise a problem</GhostButton>
+        </>)}
+        {!isCreator && ["pending", "accepted_by_creator"].includes(item.status) && (
+          <GhostButton onClick={() => act("cancel")} disabled={busy}>Cancel</GhostButton>
+        )}
+      </div>
+
+      {delivering && (
+        <div style={{ marginTop: 14, padding: 14, borderRadius: 12, border: "1px dashed #3a3a46" }}>
+          <div style={{ fontFamily: DISPLAY_FONT, fontSize: 16, marginBottom: 8 }}>Deliver your work</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+            {files.map((f, i) => (
+              <span key={i} style={{ fontSize: 12, padding: "5px 10px", borderRadius: 999, border: "1px solid #33333e", color: "#cfcfda" }}>{f.name}</span>
+            ))}
+          </div>
+          <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={addDeliveryFile} style={{ display: "none" }} />
+          <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Note for the buyer (optional)" style={{ ...inputStyle, marginBottom: 10 }} />
+          <div style={{ display: "flex", gap: 9, flexWrap: "wrap" }}>
+            <GhostButton onClick={() => fileRef.current?.click()} disabled={busy}>+ Add file</GhostButton>
+            <PrimaryButton onClick={submitDelivery} disabled={busy || files.length === 0}>Send delivery</PrimaryButton>
+            <GhostButton onClick={() => { setDelivering(false); setFiles([]); }} disabled={busy}>Cancel</GhostButton>
+          </div>
+          {files.length === 0 && <div style={{ color: "#8a8a98", fontSize: 12, marginTop: 8 }}>Attach at least one file to deliver.</div>}
+        </div>
+      )}
+
+      {!isCreator && item.status === "delivered" && (
+        <input value={note} onChange={(e) => setNote(e.target.value)}
+          placeholder="What needs changing? (used for a revision or a problem report)"
+          style={{ ...inputStyle, marginTop: 12 }} />
+      )}
+
+      <div style={{ marginTop: 16 }}>
+        <ChatThread itemId={item.id} account={account} />
+      </div>
+    </div>
+  );
+}
+
+// Buyer's orders. Each order may span two creators, so items are listed
+// individually with their own state and their own conversation.
+function OrdersView({ onClose, account, onSignIn }) {
+  const [orders, setOrders] = useState(null);
+  const [open, setOpen] = useState(null);   // full order detail
+  const [err, setErr] = useState("");
+
+  async function load() {
+    try { const d = await api("GET", "/api/mk/orders"); setOrders(d.orders || []); }
+    catch (e) { setErr(e.message); setOrders([]); }
+  }
+  async function openOrder(id) {
+    try { const d = await api("GET", `/api/mk/orders/${id}`); setOpen(d.order); }
+    catch (e) { setErr(e.message); }
+  }
+  useEffect(() => { if (account) load(); else setOrders([]); /* eslint-disable-next-line */ }, [account]);
+
+  return (
+    <MarketShell title="Your orders" onClose={onClose} account={account} onSignIn={onSignIn}>
+      {err && <div style={{ background: "rgba(239,91,107,0.12)", border: "1px solid #ef5b6b", color: "#ffc4cb", padding: "12px 16px", borderRadius: 10, marginBottom: 18, fontSize: 14 }}>⚠ {err}</div>}
+      {!account ? (
+        <EmptyState title="Sign in to see your orders" body="Orders are tied to your account so you can follow them across devices." action={<PrimaryButton onClick={onSignIn}>Sign in</PrimaryButton>} />
+      ) : open ? (
+        <>
+          <GhostButton onClick={() => { setOpen(null); load(); }} style={{ marginBottom: 18 }}>← All orders</GhostButton>
+          <div style={{ color: "#8a8a98", fontSize: 13, marginBottom: 14 }}>
+            Order {open.id.slice(0, 8)} · {money(open.totalCents)} · {open.status}
+          </div>
+          {open.items.map((it) => (
+            <ItemPanel key={it.id} item={it} role="buyer" account={account} onChanged={() => openOrder(open.id)} />
+          ))}
+        </>
+      ) : orders === null ? (
+        <div style={{ color: "#6c6c78" }}>Loading…</div>
+      ) : orders.length === 0 ? (
+        <EmptyState title="No orders yet" body="Commission a writer or an artist from the marketplace and it'll show up here." />
+      ) : (
+        orders.map((o) => (
+          <button key={o.id} onClick={() => openOrder(o.id)} style={{
+            display: "block", width: "100%", textAlign: "left", font: "inherit", cursor: "pointer",
+            background: "rgba(255,255,255,0.025)", border: "1px solid #2c2c36", borderRadius: 14,
+            padding: 18, marginBottom: 12, color: "#e8e8f0" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+              <div style={{ fontFamily: DISPLAY_FONT, fontSize: 17 }}>Order {o.id.slice(0, 8)}</div>
+              <div style={{ color: "#f3cf5b", fontFamily: DISPLAY_FONT, fontSize: 18 }}>{money(o.totalCents)}</div>
+            </div>
+            <div style={{ color: "#8a8a98", fontSize: 13, marginTop: 4 }}>{o.status}</div>
+          </button>
+        ))
+      )}
+    </MarketShell>
+  );
+}
+
+// Creator's inbox: every item assigned to them, newest first.
+function WorkView({ onClose, account, onSignIn }) {
+  const [items, setItems] = useState(null);
+  const [err, setErr] = useState("");
+  async function load() {
+    try { const d = await api("GET", "/api/mk/work"); setItems(d.items || []); }
+    catch (e) { setErr(e.message); setItems([]); }
+  }
+  useEffect(() => { if (account) load(); else setItems([]); /* eslint-disable-next-line */ }, [account]);
+
+  return (
+    <MarketShell title="Your work" onClose={onClose} account={account} onSignIn={onSignIn}>
+      {err && <div style={{ background: "rgba(239,91,107,0.12)", border: "1px solid #ef5b6b", color: "#ffc4cb", padding: "12px 16px", borderRadius: 10, marginBottom: 18, fontSize: 14 }}>⚠ {err}</div>}
+      {!account ? (
+        <EmptyState title="Sign in to see your commissions" body="Work assigned to you appears here." action={<PrimaryButton onClick={onSignIn}>Sign in</PrimaryButton>} />
+      ) : items === null ? (
+        <div style={{ color: "#6c6c78" }}>Loading…</div>
+      ) : items.length === 0 ? (
+        <EmptyState title="No commissions yet" body="When a buyer commissions one of your listings, it lands here." />
+      ) : (
+        items.map((it) => <ItemPanel key={it.id} item={it} role="creator" account={account} onChanged={load} />)
+      )}
+    </MarketShell>
+  );
+}
+
+// Shared chrome so the marketplace pages don't each re-declare a header.
+function MarketShell({ title, children, onClose, account, onSignIn }) {
+  return (
+    <div style={{ minHeight: "100vh", background: "radial-gradient(1200px 700px at 50% -5%, #2a1d3f 0%, #15121d 45%, #08070d 100%)", color: "#e8e8f0", fontFamily: UI_FONT, paddingBottom: 80 }}>
+      <GlobalCSS />
+      <header style={{ position: "sticky", top: 0, zIndex: 10, backdropFilter: "blur(10px)", background: "rgba(8,7,13,0.72)", borderBottom: "1px solid rgba(216,178,74,0.14)" }}>
+        <div style={{ maxWidth: 900, margin: "0 auto", padding: "14px 24px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+          <div style={{ fontFamily: DISPLAY_FONT, fontSize: "clamp(11px,3vw,14px)", letterSpacing: "clamp(2px,1vw,5px)", textTransform: "uppercase", color: "#d8b24a" }}>✦ {title}</div>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            {!account && <button onClick={onSignIn} style={navBtn}>Sign in</button>}
+            <GhostButton onClick={onClose} style={{ padding: "8px 16px", fontSize: 13 }}>← Back</GhostButton>
+          </div>
+        </div>
+      </header>
+      <div style={{ maxWidth: 900, margin: "0 auto", padding: "40px 24px 0" }}>{children}</div>
+    </div>
+  );
+}
+
+function EmptyState({ title, body, action }) {
+  return (
+    <div style={{ border: "1px dashed #33333e", borderRadius: 16, padding: "48px 24px", textAlign: "center" }}>
+      <div style={{ fontFamily: DISPLAY_FONT, fontSize: 21, marginBottom: 9 }}>{title}</div>
+      <p style={{ color: "#9a9aa8", fontSize: 14, lineHeight: 1.6, maxWidth: 440, margin: "0 auto 18px" }}>{body}</p>
+      {action}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // MARKETPLACE
 // ---------------------------------------------------------------------------
 // Browse is curation-led rather than search-led: approved creators only, and
@@ -2088,9 +2467,22 @@ function ListingCard({ listing }) {
 
 // Standalone listing page, reached by ?listing=<id>. Shows the work, who made
 // it, and what else they sell — the three things a buyer needs before deciding.
-function ListingDetail({ id, onClose, account, onSignIn }) {
+function ListingDetail({ id, onClose, account, onSignIn, onOrdered }) {
   const [data, setData] = useState(null);   // {listing, creator, others}
   const [err, setErr] = useState("");
+  const [ordering, setOrdering] = useState(false);
+  const [brief, setBrief] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function placeOrder() {
+    setBusy(true); setErr("");
+    try {
+      await api("POST", "/api/mk/orders", { items: [{ listingId: id, brief: brief.trim() }] });
+      setOrdering(false); setBrief("");
+      onOrdered && onOrdered();
+    } catch (e) { setErr(e.message); }
+    setBusy(false);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -2146,14 +2538,41 @@ function ListingDetail({ id, onClose, account, onSignIn }) {
                 </div>
               </div>
               <div style={{ marginLeft: "auto" }}>
-                {/* Ordering lands with the order lifecycle; showing a dead button
-                    that silently does nothing would be worse than saying so. */}
-                <PrimaryButton disabled style={{ opacity: 0.55 }}>
+                <PrimaryButton onClick={() => (account ? setOrdering(true) : onSignIn())}>
                   {l.kind === "commission" ? "Request this commission" : "Buy this"}
                 </PrimaryButton>
-                <div style={{ color: "#6c6c78", fontSize: 12, marginTop: 8, textAlign: "right" }}>Ordering opens soon</div>
+                <div style={{ color: "#6c6c78", fontSize: 12, marginTop: 8, textAlign: "right" }}>
+                  {account ? "No charge yet — payments are still being set up" : "Sign in to order"}
+                </div>
               </div>
             </div>
+
+            {ordering && (
+              <div style={{ border: "1px solid #d8b24a55", background: "rgba(216,178,74,0.06)", borderRadius: 14, padding: 20, marginBottom: 28 }}>
+                <div style={{ fontFamily: DISPLAY_FONT, fontSize: 19, marginBottom: 6 }}>
+                  {l.kind === "commission" ? "Tell them what you need" : "Confirm your order"}
+                </div>
+                <p style={{ color: "#9a9aa8", fontSize: 14, lineHeight: 1.6, margin: "0 0 14px" }}>
+                  {l.kind === "commission"
+                    ? "The occasion, the people, the tone — the more specific you are, the closer the first draft lands."
+                    : "You'll be able to personalise this with your own crew after ordering."}
+                </p>
+                {l.kind === "commission" && (
+                  <textarea value={brief} onChange={(e) => setBrief(e.target.value)} rows={5}
+                    placeholder="e.g. Dave's stag do in Lisbon, 8 of us, noir detective tone. He's terrified of seagulls."
+                    style={{ ...inputStyle, marginBottom: 12, resize: "vertical" }} />
+                )}
+                <div style={{ display: "flex", gap: 9, flexWrap: "wrap", alignItems: "center" }}>
+                  <PrimaryButton onClick={placeOrder} disabled={busy || (l.kind === "commission" && brief.trim().length < 10)}>
+                    {busy ? "…" : `Place order — ${money(l.priceCents)}`}
+                  </PrimaryButton>
+                  <GhostButton onClick={() => setOrdering(false)} disabled={busy}>Cancel</GhostButton>
+                  {l.kind === "commission" && brief.trim().length < 10 && (
+                    <span style={{ color: "#8a8a98", fontSize: 13 }}>A brief is required</span>
+                  )}
+                </div>
+              </div>
+            )}
 
             {l.description && (
               <div style={{ color: "#c8c8d4", fontSize: 15, lineHeight: 1.7, whiteSpace: "pre-wrap", marginBottom: 34 }}>{l.description}</div>
@@ -2186,7 +2605,7 @@ function ListingDetail({ id, onClose, account, onSignIn }) {
   );
 }
 
-function Marketplace({ onClose, account, onSignIn, onBecomeCreator }) {
+function Marketplace({ onClose, account, onSignIn, onBecomeCreator, onOrders }) {
   const [discipline, setDiscipline] = useState("");
   const [kind, setKind] = useState("");
   const [listings, setListings] = useState(null);   // null = loading
@@ -2222,6 +2641,7 @@ function Marketplace({ onClose, account, onSignIn, onBecomeCreator }) {
         <div style={{ maxWidth: 1040, margin: "0 auto", padding: "14px 24px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
           <div onClick={onClose} style={{ cursor: "pointer", fontFamily: DISPLAY_FONT, fontSize: "clamp(11px,3vw,14px)", letterSpacing: "clamp(2px,1vw,5px)", textTransform: "uppercase", color: "#d8b24a", whiteSpace: "nowrap" }}>✦ Side Quest</div>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" }}>
+            {account && <button onClick={onOrders} style={navBtn}>◷ Orders</button>}
             <button onClick={onBecomeCreator} style={navBtn}>Sell your work</button>
             {!account && <button onClick={onSignIn} style={navBtn}>Sign in</button>}
             <GhostButton onClick={onClose} style={{ padding: "8px 16px", fontSize: 13 }}>← Back to builder</GhostButton>
@@ -2270,7 +2690,7 @@ function Marketplace({ onClose, account, onSignIn, onBecomeCreator }) {
 
 // Creator-side: apply, then manage listings. Deliberately plain — this is a
 // working surface for a small invited roster, not a storefront builder.
-function CreatorStudio({ onClose, account, onSignIn }) {
+function CreatorStudio({ onClose, account, onSignIn, onWork }) {
   const [creators, setCreators] = useState(null);
   const [listings, setListings] = useState([]);
   const [err, setErr] = useState("");
@@ -2336,7 +2756,10 @@ function CreatorStudio({ onClose, account, onSignIn }) {
       <header style={{ position: "sticky", top: 0, zIndex: 10, backdropFilter: "blur(10px)", background: "rgba(8,7,13,0.72)", borderBottom: "1px solid rgba(216,178,74,0.14)" }}>
         <div style={{ maxWidth: 900, margin: "0 auto", padding: "14px 24px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
           <div style={{ fontFamily: DISPLAY_FONT, fontSize: "clamp(11px,3vw,14px)", letterSpacing: "clamp(2px,1vw,5px)", textTransform: "uppercase", color: "#d8b24a" }}>✦ Creator studio</div>
-          <GhostButton onClick={onClose} style={{ padding: "8px 16px", fontSize: 13 }}>← Back</GhostButton>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            {account && <button onClick={onWork} style={navBtn}>◷ Incoming work</button>}
+            <GhostButton onClick={onClose} style={{ padding: "8px 16px", fontSize: 13 }}>← Back</GhostButton>
+          </div>
         </div>
       </header>
 
