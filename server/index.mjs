@@ -19,7 +19,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { query, migrate, dbEnabled } from "./db.mjs";
-import { r2Enabled, r2Config, r2Check, r2Put, artKey } from "./r2.mjs";
+import { r2Enabled, r2Config, r2Check, r2Put, r2PresignPut, artKey } from "./r2.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -635,6 +635,113 @@ async function deliverablesList(itemId, ctx) {
       lore: d.lore, note: d.note, createdAt: msOf(d.created_at),
     })),
   };
+}
+
+// ---- Marketplace: chat -----------------------------------------------------
+// Threads are scoped to an order ITEM, not an order, so each creator sees only
+// their own conversation with the buyer. On a two-creator order the writer must
+// not read what the buyer said to the artist.
+//
+// Polling rather than sockets, matching the existing collab poll: a `since`
+// cursor and short messages. Render's free tier doesn't hold many open sockets,
+// and chat here is asynchronous by nature — nobody is waiting mid-keystroke.
+
+const CHAT_MAX_LEN = 4000;
+// Only image types are accepted for previews. The signed content-type is what
+// the client must then send, so this list is a real constraint rather than a
+// suggestion — see r2PresignPut.
+const ATTACH_TYPES = {
+  "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif",
+};
+const ATTACH_MAX_BYTES = 25 * 1024 * 1024;
+
+function messageRow(r) {
+  return {
+    id: r.id, orderItemId: r.order_item_id, senderId: r.sender_id,
+    body: r.body, attachments: r.attachments || [],
+    createdAt: msOf(r.created_at), readAt: r.read_at ? msOf(r.read_at) : null,
+    ...(r.sender_name ? { senderName: r.sender_name } : {}),
+  };
+}
+
+async function messageSend(itemId, body, ctx) {
+  requireDb(); requireUser(ctx);
+  const { item } = await itemWithRole(itemId, ctx);   // 404s for non-participants
+  const text = String(body?.body || "").trim();
+  const attachments = Array.isArray(body?.attachments) ? body.attachments.slice(0, 10) : [];
+  if (!text && attachments.length === 0) throw httpErr(422, "message or attachment required");
+  if (text.length > CHAT_MAX_LEN) throw httpErr(422, `message too long (max ${CHAT_MAX_LEN})`);
+
+  // Only accept attachment URLs that live in our own bucket. Without this the
+  // field is an open redirect: anyone could post a link to any host and have it
+  // rendered inline as a trusted "preview" inside the order thread.
+  const publicBase = r2Config().publicUrl;
+  const clean = attachments.map((a) => {
+    const url = String(a?.url || "");
+    if (!publicBase || !url.startsWith(publicBase + "/")) throw httpErr(422, "attachment must be an uploaded file");
+    return { url, name: String(a?.name || "attachment").slice(0, 120), contentType: String(a?.contentType || "") };
+  });
+
+  const id = crypto.randomUUID();
+  await query(
+    `INSERT INTO mk_messages (id, order_item_id, sender_id, body, attachments)
+     VALUES ($1,$2,$3,$4,$5)`,
+    [id, itemId, ctx.userId, text || null, JSON.stringify(clean)]
+  );
+  const r = await query(
+    `SELECT m.*, u.display_name AS sender_name FROM mk_messages m
+       LEFT JOIN users u ON u.id = m.sender_id WHERE m.id = $1`, [id]);
+  return { message: messageRow(r.rows[0]) };
+}
+
+async function messagesList(itemId, q, ctx) {
+  requireDb(); requireUser(ctx);
+  await itemWithRole(itemId, ctx);
+  const since = Number(q.get("since")) || 0;
+  const r = await query(
+    `SELECT m.*, u.display_name AS sender_name FROM mk_messages m
+       LEFT JOIN users u ON u.id = m.sender_id
+      WHERE m.order_item_id = $1 AND ($2::bigint = 0 OR m.created_at > to_timestamp($2::bigint / 1000.0))
+      ORDER BY m.created_at LIMIT 500`,
+    [itemId, since]
+  );
+  // Reading the thread marks the other party's messages read. Cheap, and it's
+  // what makes an unread badge possible without a separate endpoint.
+  await query(
+    `UPDATE mk_messages SET read_at = now()
+      WHERE order_item_id = $1 AND sender_id <> $2 AND read_at IS NULL`, [itemId, ctx.userId]);
+  return { messages: r.rows.map(messageRow) };
+}
+
+// Cheap poll for "is there anything new" — returns counts only, so a client can
+// badge unread without pulling the whole thread on a timer.
+async function messagesPoll(itemId, ctx) {
+  requireDb(); requireUser(ctx);
+  await itemWithRole(itemId, ctx);
+  const r = await query(
+    `SELECT count(*) AS total,
+            count(*) FILTER (WHERE sender_id <> $2 AND read_at IS NULL) AS unread,
+            COALESCE(MAX(created_at), to_timestamp(0)) AS latest
+       FROM mk_messages WHERE order_item_id = $1`, [itemId, ctx.userId]);
+  const row = r.rows[0];
+  return { total: Number(row.total), unread: Number(row.unread), latestAt: msOf(row.latest) };
+}
+
+// Hand back a presigned URL so the browser uploads straight to R2.
+async function attachmentPresign(itemId, body, ctx) {
+  requireDb(); requireUser(ctx);
+  await itemWithRole(itemId, ctx);   // participants only
+  if (!r2Enabled()) throw httpErr(503, "file uploads are not configured");
+  const contentType = String(body?.contentType || "").toLowerCase();
+  const ext = ATTACH_TYPES[contentType];
+  if (!ext) throw httpErr(422, `unsupported type (allowed: ${Object.keys(ATTACH_TYPES).join(", ")})`);
+  const size = Number(body?.sizeBytes) || 0;
+  if (size > ATTACH_MAX_BYTES) throw httpErr(413, `file too large (max ${ATTACH_MAX_BYTES / 1024 / 1024}MB)`);
+
+  // Random key, not content-addressed: two participants uploading the same
+  // image should not collide into one object whose lifetime they now share.
+  const key = `chat/${itemId}/${crypto.randomBytes(12).toString("hex")}.${ext}`;
+  return r2PresignPut(key, contentType);
 }
 
 // ---- Deck persistence (replaces the client's localStorage shim) ------------
@@ -1420,6 +1527,10 @@ const server = http.createServer(async (req, res) => {
       else if (req.method === "GET" && p === "/api/mk/work") result = await ordersForCreator(ctx);
       else if (req.method === "GET" && (m = p.match(/^\/api\/mk\/orders\/([^/]+)$/))) result = await orderGet(decodeURIComponent(m[1]), ctx);
       // Order-item lifecycle — every transition through one funnel.
+      else if (req.method === "POST" && (m = p.match(/^\/api\/mk\/items\/([^/]+)\/messages$/))) result = await messageSend(decodeURIComponent(m[1]), body, ctx);
+      else if (req.method === "GET" && (m = p.match(/^\/api\/mk\/items\/([^/]+)\/messages$/))) result = await messagesList(decodeURIComponent(m[1]), q, ctx);
+      else if (req.method === "GET" && (m = p.match(/^\/api\/mk\/items\/([^/]+)\/messages\/poll$/))) result = await messagesPoll(decodeURIComponent(m[1]), ctx);
+      else if (req.method === "POST" && (m = p.match(/^\/api\/mk\/items\/([^/]+)\/attachments$/))) result = await attachmentPresign(decodeURIComponent(m[1]), body, ctx);
       else if (req.method === "POST" && (m = p.match(/^\/api\/mk\/items\/([^/]+)\/deliverables$/))) result = await deliverableCreate(decodeURIComponent(m[1]), body, ctx);
       else if (req.method === "GET" && (m = p.match(/^\/api\/mk\/items\/([^/]+)\/deliverables$/))) result = await deliverablesList(decodeURIComponent(m[1]), ctx);
       else if (req.method === "POST" && (m = p.match(/^\/api\/mk\/items\/([^/]+)\/([a-z_]+)$/))) result = await itemTransition(decodeURIComponent(m[1]), m[2], body, ctx);

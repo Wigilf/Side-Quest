@@ -162,3 +162,55 @@ export async function r2Check() {
 export function artKey(buffer, ext = "jpg") {
   return `art/${sha256hex(buffer).slice(0, 32)}.${ext}`;
 }
+
+/**
+ * Presigned PUT URL so the browser uploads straight to R2.
+ *
+ * The alternative — POST the file to our server and have it forward the bytes —
+ * routes every upload through a 0.1-CPU/512MB instance. A single artist
+ * delivering a few large files would be enough to hurt, and it buys nothing:
+ * the bytes are opaque to us either way.
+ *
+ * `content-type` is signed, not just `host`. If only host were signed, the
+ * client could upload anything under any type — including text/html, which
+ * would then be served as a live document from the bucket's own origin. Signing
+ * the type means the upload only succeeds with the type we authorized.
+ */
+export function r2PresignPut(key, contentType, expiresSeconds = 900) {
+  if (!r2Enabled()) throw new Error("R2 is not configured");
+  const base = new URL(endpoint());
+  const host = base.port ? `${base.hostname}:${base.port}` : base.hostname;
+  const canonicalUri = `/${BUCKET}/${encodeKey(key)}`;
+  const amzDate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, "");
+  const dateStamp = amzDate.slice(0, 8);
+  const scope = `${dateStamp}/${REGION}/${SERVICE}/aws4_request`;
+
+  // Signed headers must be sorted; content-type sorts before host.
+  const signedHeaders = "content-type;host";
+  const q = new URLSearchParams({
+    "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
+    "X-Amz-Credential": `${ACCESS_KEY_ID}/${scope}`,
+    "X-Amz-Date": amzDate,
+    "X-Amz-Expires": String(expiresSeconds),
+    "X-Amz-SignedHeaders": signedHeaders,
+  });
+  // Query params must be sorted by key for the canonical request.
+  const canonicalQuery = [...q.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : 1))
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+    .join("&");
+
+  const canonicalHeaders = `content-type:${contentType}\nhost:${host}\n`;
+  const canonicalRequest = [
+    "PUT", canonicalUri, canonicalQuery, canonicalHeaders, signedHeaders, "UNSIGNED-PAYLOAD",
+  ].join("\n");
+  const stringToSign = ["AWS4-HMAC-SHA256", amzDate, scope, sha256hex(canonicalRequest)].join("\n");
+  const signature = crypto.createHmac("sha256", signingKey(dateStamp)).update(stringToSign).digest("hex");
+
+  return {
+    uploadUrl: `${base.origin}${canonicalUri}?${canonicalQuery}&X-Amz-Signature=${signature}`,
+    publicUrl: `${PUBLIC_URL}/${encodeKey(key)}`,
+    contentType,
+    expiresIn: expiresSeconds,
+  };
+}
