@@ -374,6 +374,269 @@ async function listingPublic(id) {
   return { listing: listingRow(r.rows[0]) };
 }
 
+// ---- Marketplace: orders ---------------------------------------------------
+// One order can hire both a writer and an artist, so the lifecycle runs per
+// ITEM, not per order: the writer can be delivered and accepted while the
+// artist is still drawing. The order completes only when every item does.
+//
+// The legal transitions are a table rather than scattered `if`s, because the
+// interesting bugs here are the illegal ones — a creator marking work accepted
+// on the buyer's behalf, a second delivery after acceptance, revisions past
+// the agreed count. Each of those is a state check, and a table makes the
+// whole surface reviewable in one place.
+//
+// Money is NOT charged here — Stripe Connect is a separate slice. What this
+// does record is the ledger entries, so when payments land the accounting is
+// already correct and the release points are already in the right places.
+
+const ITEM_TRANSITIONS = {
+  //           who may do it        from                              to
+  accept:            { actor: "creator", from: ["pending"],                         to: "accepted_by_creator" },
+  decline:           { actor: "creator", from: ["pending"],                         to: "declined" },
+  start:             { actor: "creator", from: ["accepted_by_creator"],             to: "in_progress" },
+  deliver:           { actor: "creator", from: ["accepted_by_creator", "in_progress", "revision_requested"], to: "delivered" },
+  request_revision:  { actor: "buyer",   from: ["delivered"],                       to: "revision_requested" },
+  accept_delivery:   { actor: "buyer",   from: ["delivered"],                       to: "accepted" },
+  dispute:           { actor: "buyer",   from: ["delivered", "revision_requested"], to: "disputed" },
+  cancel:            { actor: "buyer",   from: ["pending", "accepted_by_creator"],  to: "cancelled" },
+};
+
+function orderItemRow(r) {
+  return {
+    id: r.id, orderId: r.order_id, listingId: r.listing_id, creatorId: r.creator_id,
+    discipline: r.discipline, kind: r.kind, title: r.title,
+    priceCents: r.price_cents, creatorEarningsCents: r.creator_earnings_cents,
+    revisionsIncluded: r.revisions_included, revisionsUsed: r.revisions_used,
+    brief: r.brief, status: r.status,
+    dueAt: r.due_at ? msOf(r.due_at) : null,
+    deliveredAt: r.delivered_at ? msOf(r.delivered_at) : null,
+    acceptedAt: r.accepted_at ? msOf(r.accepted_at) : null,
+    createdAt: msOf(r.created_at),
+    ...(r.creator_name ? { creator: { id: r.creator_id, displayName: r.creator_name } } : {}),
+  };
+}
+
+function orderRow(r, items) {
+  return {
+    id: r.id, buyerId: r.buyer_id, deckId: r.deck_id, status: r.status,
+    subtotalCents: r.subtotal_cents, platformFeeCents: r.platform_fee_cents,
+    totalCents: r.total_cents, currency: r.currency,
+    paidAt: r.paid_at ? msOf(r.paid_at) : null,
+    createdAt: msOf(r.created_at),
+    ...(items ? { items } : {}),
+  };
+}
+
+// Buyer commissions one or more listings in a single order.
+async function orderCreate(body, ctx) {
+  requireDb(); requireUser(ctx);
+  const reqItems = Array.isArray(body?.items) ? body.items : [];
+  if (!reqItems.length) throw httpErr(422, "at least one item required");
+  if (reqItems.length > 10) throw httpErr(422, "too many items");
+
+  // Resolve every listing first so an invalid one fails before anything is written.
+  const resolved = [];
+  for (const it of reqItems) {
+    const l = (await query(
+      `SELECT l.*, c.status AS creator_status FROM mk_listings l
+         JOIN mk_creators c ON c.id = l.creator_id
+        WHERE l.id = $1`, [String(it?.listingId || "")])).rows[0];
+    if (!l) throw httpErr(404, `listing not found: ${it?.listingId}`);
+    if (l.status !== "published" || l.creator_status !== "approved") {
+      throw httpErr(409, `listing is not available: ${l.title}`);
+    }
+    if (l.kind === "commission" && !String(it?.brief || "").trim()) {
+      throw httpErr(422, `a brief is required for "${l.title}"`);
+    }
+    resolved.push({ listing: l, brief: String(it?.brief || "").trim() || null });
+  }
+
+  const orderId = crypto.randomUUID();
+  const subtotal = resolved.reduce((s, r) => s + r.listing.price_cents, 0);
+  const fee = resolved.reduce((s, r) => s + splitPrice(r.listing.price_cents).platformFeeCents, 0);
+
+  await query(
+    `INSERT INTO mk_orders (id, buyer_id, deck_id, status, subtotal_cents, platform_fee_cents, total_cents)
+     VALUES ($1,$2,$3,'awaiting_payment',$4,$5,$6)`,
+    [orderId, ctx.userId, body?.deckId || null, subtotal, fee, subtotal]
+  );
+
+  for (const { listing, brief } of resolved) {
+    const split = splitPrice(listing.price_cents);
+    // Price and terms are snapshotted: a creator editing the listing later must
+    // not change what this buyer already agreed to.
+    await query(
+      `INSERT INTO mk_order_items
+         (id, order_id, listing_id, creator_id, discipline, kind, title, price_cents,
+          creator_earnings_cents, revisions_included, brief, status, due_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending',
+               CASE WHEN $12::int IS NULL THEN NULL ELSE now() + ($12 || ' days')::interval END)`,
+      [crypto.randomUUID(), orderId, listing.id, listing.creator_id, listing.discipline, listing.kind,
+       listing.title, listing.price_cents, split.creatorEarningsCents, listing.revisions_included,
+       brief, listing.delivery_days]
+    );
+  }
+  return orderGet(orderId, ctx);
+}
+
+// Load an order the caller is entitled to see: the buyer, or a creator with an
+// item on it (creators see the order, but only their own thread of work).
+async function orderGet(id, ctx) {
+  requireDb(); requireUser(ctx);
+  const o = (await query("SELECT * FROM mk_orders WHERE id = $1", [id])).rows[0];
+  if (!o) throw httpErr(404, "not found");
+  const isBuyer = o.buyer_id === ctx.userId;
+  const mine = await query(
+    `SELECT i.*, c.display_name AS creator_name FROM mk_order_items i
+       JOIN mk_creators c ON c.id = i.creator_id
+      WHERE i.order_id = $1 AND ($2::boolean OR c.user_id = $3)
+      ORDER BY i.created_at`,
+    [id, isBuyer, ctx.userId]
+  );
+  if (!isBuyer && mine.rows.length === 0) throw httpErr(404, "not found");
+  return { order: orderRow(o, mine.rows.map(orderItemRow)) };
+}
+
+async function ordersMine(ctx) {
+  requireDb(); requireUser(ctx);
+  const r = await query(
+    `SELECT * FROM mk_orders WHERE buyer_id = $1 ORDER BY created_at DESC LIMIT 50`, [ctx.userId]);
+  return { orders: r.rows.map((o) => orderRow(o)) };
+}
+
+// A creator's inbox: items assigned to them across all orders.
+async function ordersForCreator(ctx) {
+  requireDb(); requireUser(ctx);
+  const r = await query(
+    `SELECT i.*, c.display_name AS creator_name FROM mk_order_items i
+       JOIN mk_creators c ON c.id = i.creator_id
+      WHERE c.user_id = $1 AND i.status NOT IN ('cancelled','declined')
+      ORDER BY i.created_at DESC LIMIT 100`, [ctx.userId]);
+  return { items: r.rows.map(orderItemRow) };
+}
+
+// Resolve an item plus who the caller is relative to it.
+async function itemWithRole(itemId, ctx) {
+  const r = (await query(
+    `SELECT i.*, o.buyer_id, c.user_id AS creator_user_id, c.display_name AS creator_name
+       FROM mk_order_items i
+       JOIN mk_orders o ON o.id = i.order_id
+       JOIN mk_creators c ON c.id = i.creator_id
+      WHERE i.id = $1`, [itemId])).rows[0];
+  if (!r) throw httpErr(404, "not found");
+  const role = r.buyer_id === ctx.userId ? "buyer" : r.creator_user_id === ctx.userId ? "creator" : null;
+  if (!role) throw httpErr(404, "not found");
+  return { item: r, role };
+}
+
+// The single funnel every lifecycle change goes through.
+async function itemTransition(itemId, action, body, ctx) {
+  requireDb(); requireUser(ctx);
+  const rule = ITEM_TRANSITIONS[action];
+  if (!rule) throw httpErr(404, "unknown action");
+  const { item, role } = await itemWithRole(itemId, ctx);
+
+  if (role !== rule.actor) {
+    throw httpErr(403, `only the ${rule.actor} can ${action.replace(/_/g, " ")}`);
+  }
+  if (!rule.from.includes(item.status)) {
+    throw httpErr(409, `cannot ${action.replace(/_/g, " ")} an item that is "${item.status}"`);
+  }
+  // A revision request beyond the agreed count is a scope change, not a right.
+  if (action === "request_revision" && item.revisions_used >= item.revisions_included) {
+    throw httpErr(409, `all ${item.revisions_included} included revisions have been used`);
+  }
+
+  const sets = ["status = $2", "updated_at = now()"];
+  const params = [itemId, rule.to, rule.from];
+  if (action === "deliver") sets.push("delivered_at = now()");
+  if (action === "request_revision") sets.push("revisions_used = revisions_used + 1");
+  if (action === "accept_delivery") sets.push("accepted_at = now()");
+  // Re-check the source state inside the UPDATE, not just in the read above.
+  // Two concurrent requests can both pass the check and then both write;
+  // making the write conditional means the loser changes nothing and 409s.
+  const upd = await query(
+    `UPDATE mk_order_items SET ${sets.join(", ")} WHERE id = $1 AND status = ANY($3::text[])`, params);
+  if (upd.rowCount === 0) throw httpErr(409, `cannot ${action.replace(/_/g, " ")} an item that is "${item.status}"`);
+
+  if (action === "accept_delivery") {
+    // Acceptance is the release point. Recorded as two entries so "earned" and
+    // "paid out" stay separately auditable — a refund later posts a
+    // compensating entry rather than editing history.
+    await query(
+      `INSERT INTO mk_ledger (id, creator_id, order_id, order_item_id, kind, amount_cents, note)
+       VALUES ($1,$2,$3,$4,'earning',$5,'item accepted by buyer')`,
+      [crypto.randomUUID(), item.creator_id, item.order_id, item.id, item.creator_earnings_cents]
+    );
+    await maybeCompleteOrder(item.order_id);
+  }
+  if (action === "dispute") {
+    await query(
+      `INSERT INTO mk_ledger (id, creator_id, order_id, order_item_id, kind, amount_cents, note)
+       VALUES ($1,$2,$3,$4,'adjustment',0,$5)`,
+      [crypto.randomUUID(), item.creator_id, item.order_id, item.id,
+       `disputed by buyer: ${String(body?.reason || "").slice(0, 200)}`]
+    );
+    // Funds stay held. Neither released nor refunded until support decides —
+    // auto-refunding is exploitable, and auto-releasing drives creators away.
+  }
+  return orderGet(item.order_id, ctx);
+}
+
+// The order is done only when every item is. Cancelled and declined items don't
+// block it — otherwise one creator declining would strand the whole order.
+async function maybeCompleteOrder(orderId) {
+  const r = await query(
+    `SELECT count(*) FILTER (WHERE status NOT IN ('accepted','cancelled','declined')) AS open
+       FROM mk_order_items WHERE order_id = $1`, [orderId]);
+  if (Number(r.rows[0].open) === 0) {
+    await query(`UPDATE mk_orders SET status = 'completed', updated_at = now() WHERE id = $1`, [orderId]);
+  }
+}
+
+// Creator submits work. Kept as versioned history rather than overwritten, so a
+// dispute can show what was sent and when.
+async function deliverableCreate(itemId, body, ctx) {
+  requireDb(); requireUser(ctx);
+  const { item, role } = await itemWithRole(itemId, ctx);
+  if (role !== "creator") throw httpErr(403, "only the creator can deliver");
+  const kind = String(body?.kind || "").toLowerCase();
+  if (!["files", "lore", "deck"].includes(kind)) throw httpErr(422, "kind must be files, lore or deck");
+  const files = Array.isArray(body?.files) ? body.files : [];
+  if (kind === "files" && files.length === 0) throw httpErr(422, "at least one file required");
+  if (kind === "lore" && !body?.lore) throw httpErr(422, "lore payload required");
+
+  // Transition FIRST, then record. The other order leaves a phantom
+  // deliverable behind whenever the transition is rejected — and the delivery
+  // history is exactly what a dispute is adjudicated on, so a record of a
+  // delivery that never happened is worse than no record at all.
+  const result = await itemTransition(itemId, "deliver", body, ctx);
+
+  const v = (await query(
+    `SELECT COALESCE(MAX(version),0) + 1 AS next FROM mk_deliverables WHERE order_item_id = $1`, [itemId]
+  )).rows[0].next;
+  await query(
+    `INSERT INTO mk_deliverables (id, order_item_id, version, kind, files, lore, note)
+     VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+    [crypto.randomUUID(), itemId, v, kind, JSON.stringify(files),
+     body?.lore ? JSON.stringify(body.lore) : null, body?.note || null]
+  );
+  return result;
+}
+
+async function deliverablesList(itemId, ctx) {
+  requireDb(); requireUser(ctx);
+  await itemWithRole(itemId, ctx); // authorization only
+  const r = await query(
+    `SELECT * FROM mk_deliverables WHERE order_item_id = $1 ORDER BY version`, [itemId]);
+  return {
+    deliverables: r.rows.map((d) => ({
+      id: d.id, version: d.version, kind: d.kind, files: d.files || [],
+      lore: d.lore, note: d.note, createdAt: msOf(d.created_at),
+    })),
+  };
+}
+
 // ---- Deck persistence (replaces the client's localStorage shim) ------------
 
 async function decksList(ctx) {
@@ -1151,6 +1414,15 @@ const server = http.createServer(async (req, res) => {
       else if (req.method === "GET" && p === "/api/mk/listings") result = await listingBrowse(q);
       else if (req.method === "PATCH" && (m = p.match(/^\/api\/mk\/listings\/([^/]+)$/))) result = await listingUpdate(decodeURIComponent(m[1]), body, ctx);
       else if (req.method === "GET" && (m = p.match(/^\/api\/mk\/listings\/([^/]+)$/))) result = await listingPublic(decodeURIComponent(m[1]));
+      // Orders
+      else if (req.method === "POST" && p === "/api/mk/orders") result = await orderCreate(body, ctx);
+      else if (req.method === "GET" && p === "/api/mk/orders") result = await ordersMine(ctx);
+      else if (req.method === "GET" && p === "/api/mk/work") result = await ordersForCreator(ctx);
+      else if (req.method === "GET" && (m = p.match(/^\/api\/mk\/orders\/([^/]+)$/))) result = await orderGet(decodeURIComponent(m[1]), ctx);
+      // Order-item lifecycle — every transition through one funnel.
+      else if (req.method === "POST" && (m = p.match(/^\/api\/mk\/items\/([^/]+)\/deliverables$/))) result = await deliverableCreate(decodeURIComponent(m[1]), body, ctx);
+      else if (req.method === "GET" && (m = p.match(/^\/api\/mk\/items\/([^/]+)\/deliverables$/))) result = await deliverablesList(decodeURIComponent(m[1]), ctx);
+      else if (req.method === "POST" && (m = p.match(/^\/api\/mk\/items\/([^/]+)\/([a-z_]+)$/))) result = await itemTransition(decodeURIComponent(m[1]), m[2], body, ctx);
       else { send(res, 404, { error: "not_found" }, origin); return; }
       send(res, 200, result, origin);
       return;
