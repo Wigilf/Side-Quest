@@ -2282,9 +2282,67 @@ function ItemPanel({ item, role, account, onChanged }) {
           style={{ ...inputStyle, marginTop: 12 }} />
       )}
 
+      {!isCreator && item.status === "accepted" && <ReviewBox itemId={item.id} />}
+
       <div style={{ marginTop: 16 }}>
         <ChatThread itemId={item.id} account={account} />
       </div>
+    </div>
+  );
+}
+
+// Shown once work is accepted. Reviews are only possible at that point, which
+// is what makes them verified — and stops a rating being used as leverage
+// while the job is still in flight.
+function ReviewBox({ itemId }) {
+  const [existing, setExisting] = useState(undefined); // undefined = loading
+  const [rating, setRating] = useState(0);
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      try { const d = await api("GET", `/api/mk/items/${itemId}/review`); setExisting(d.review); }
+      catch (e) { setExisting(null); }
+    })();
+  }, [itemId]);
+
+  async function submit() {
+    setBusy(true); setErr("");
+    try {
+      await api("POST", `/api/mk/items/${itemId}/review`, { rating, body: text.trim() });
+      setExisting({ rating, body: text.trim() });
+    } catch (e) { setErr(e.message); }
+    setBusy(false);
+  }
+
+  if (existing === undefined) return null;
+  if (existing) {
+    return (
+      <div style={{ marginTop: 14, padding: 14, borderRadius: 12, border: "1px solid #24242e", background: "rgba(0,0,0,0.2)" }}>
+        <div style={{ fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: "#8a8a98", marginBottom: 6 }}>Your review</div>
+        <div style={{ color: "#d8b24a", fontSize: 16 }}>{"★".repeat(existing.rating)}<span style={{ color: "#33333e" }}>{"★".repeat(5 - existing.rating)}</span></div>
+        {existing.body && <div style={{ color: "#c8c8d4", fontSize: 14, lineHeight: 1.6, marginTop: 6 }}>{existing.body}</div>}
+      </div>
+    );
+  }
+  return (
+    <div style={{ marginTop: 14, padding: 16, borderRadius: 12, border: "1px dashed #3a3a46" }}>
+      <div style={{ fontFamily: DISPLAY_FONT, fontSize: 17, marginBottom: 4 }}>How did it go?</div>
+      <p style={{ color: "#9a9aa8", fontSize: 13, margin: "0 0 12px" }}>
+        Only buyers who completed a commission can review, so this carries weight.
+      </p>
+      <div style={{ display: "flex", gap: 4, marginBottom: 12 }}>
+        {[1, 2, 3, 4, 5].map((n) => (
+          <button key={n} onClick={() => setRating(n)} title={`${n} star${n > 1 ? "s" : ""}`}
+            style={{ background: "none", border: "none", cursor: "pointer", fontSize: 26, lineHeight: 1, padding: 0,
+              color: n <= rating ? "#d8b24a" : "#33333e" }}>★</button>
+        ))}
+      </div>
+      <input value={text} onChange={(e) => setText(e.target.value)} placeholder="A sentence for other buyers (optional)" style={{ ...inputStyle, marginBottom: 12 }} />
+      {err && <div style={{ color: "#ffc4cb", fontSize: 13, marginBottom: 10 }}>⚠ {err}</div>}
+      <PrimaryButton onClick={submit} disabled={busy || rating === 0}>Leave review</PrimaryButton>
     </div>
   );
 }
@@ -2490,12 +2548,13 @@ function ListingDetail({ id, onClose, account, onSignIn, onOrdered }) {
       try {
         const { listing } = await api("GET", `/api/mk/listings/${encodeURIComponent(id)}`);
         // The creator's public page carries their bio and their other listings.
-        let creator = null, others = [];
+        let creator = null, others = [], reviews = [];
         try {
           const c = await api("GET", `/api/mk/creators/${encodeURIComponent(listing.creatorId)}`);
           creator = c.creator; others = (c.listings || []).filter((l) => l.id !== listing.id);
+          reviews = c.reviews || [];
         } catch (e) { /* listing still viewable without the profile */ }
-        if (!cancelled) setData({ listing, creator, others });
+        if (!cancelled) setData({ listing, creator, others, reviews });
       } catch (e) { if (!cancelled) setErr(e.message); }
     })();
     return () => { cancelled = true; };
@@ -2587,6 +2646,21 @@ function ListingDetail({ id, onClose, account, onSignIn, onOrdered }) {
                 </div>
                 {c.headline && <div style={{ color: "#9a9aa8", fontSize: 14, marginTop: 4 }}>{c.headline}</div>}
                 {c.bio && <p style={{ color: "#c8c8d4", fontSize: 14, lineHeight: 1.7, marginTop: 14 }}>{c.bio}</p>}
+
+                {(data.reviews || []).length > 0 && (
+                  <div style={{ marginTop: 20, paddingTop: 18, borderTop: "1px solid #24242e" }}>
+                    <div style={{ fontFamily: DISPLAY_FONT, fontSize: 17, marginBottom: 12 }}>What buyers said</div>
+                    {data.reviews.slice(0, 5).map((rv) => (
+                      <div key={rv.id} style={{ paddingBottom: 12, marginBottom: 12, borderBottom: "1px solid #1e1e28" }}>
+                        <div style={{ color: "#d8b24a", fontSize: 13 }}>
+                          {"★".repeat(rv.rating)}<span style={{ color: "#33333e" }}>{"★".repeat(5 - rv.rating)}</span>
+                          <span style={{ color: "#6c6c78", marginLeft: 8 }}>{rv.buyerName}</span>
+                        </div>
+                        {rv.body && <div style={{ color: "#c8c8d4", fontSize: 14, lineHeight: 1.6, marginTop: 5 }}>{rv.body}</div>}
+                      </div>
+                    ))}
+                  </div>
+                )}
 
                 {data.others.length > 0 && (
                   <div style={{ marginTop: 22, paddingTop: 18, borderTop: "1px solid #24242e" }}>

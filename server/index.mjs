@@ -251,7 +251,8 @@ async function creatorPublic(id) {
   const c = (await query("SELECT * FROM mk_creators WHERE id = $1 AND status = 'approved'", [id])).rows[0];
   if (!c) throw httpErr(404, "not found");
   const l = await query("SELECT * FROM mk_listings WHERE creator_id = $1 AND status = 'published' ORDER BY created_at DESC", [id]);
-  return { creator: creatorRow(c), listings: l.rows.map(listingRow) };
+  const rv = await reviewsForCreator(id);
+  return { creator: creatorRow(c), listings: l.rows.map(listingRow), reviews: rv.reviews };
 }
 
 // Resolve a creator profile the caller actually owns, for listing mutations.
@@ -742,6 +743,81 @@ async function attachmentPresign(itemId, body, ctx) {
   // image should not collide into one object whose lifetime they now share.
   const key = `chat/${itemId}/${crypto.randomBytes(12).toString("hex")}.${ext}`;
   return r2PresignPut(key, contentType);
+}
+
+// ---- Marketplace: reviews --------------------------------------------------
+// A review hangs off an order item, which is what makes it verified: you can
+// only review work you actually paid for and accepted. That constraint is the
+// entire value of the rating — an open review form is worth nothing on a
+// marketplace whose pitch is curation.
+//
+// The aggregate on mk_creators is recomputed from the reviews table rather than
+// incremented, so it can never drift from the underlying rows.
+
+async function reviewCreate(itemId, body, ctx) {
+  requireDb(); requireUser(ctx);
+  const { item, role } = await itemWithRole(itemId, ctx);
+  if (role !== "buyer") throw httpErr(403, "only the buyer can review");
+  // Reviewing before acceptance would let a buyer threaten a rating mid-job.
+  if (item.status !== "accepted") throw httpErr(409, "you can review once the work is accepted");
+
+  const rating = Math.round(Number(body?.rating));
+  if (!Number.isFinite(rating) || rating < 1 || rating > 5) throw httpErr(422, "rating must be 1-5");
+  const text = String(body?.body || "").trim().slice(0, 2000) || null;
+
+  try {
+    await query(
+      `INSERT INTO mk_reviews (id, order_item_id, creator_id, buyer_id, rating, body)
+       VALUES ($1,$2,$3,$4,$5,$6)`,
+      [crypto.randomUUID(), itemId, item.creator_id, ctx.userId, rating, text]);
+  } catch (e) {
+    if (String(e.message).includes("mk_reviews_order_item_id_key")) {
+      throw httpErr(409, "you have already reviewed this");
+    }
+    throw e;
+  }
+  await recomputeCreatorRating(item.creator_id);
+  return reviewsForCreator(item.creator_id);
+}
+
+// Recompute from source rather than incrementing a counter — a running total
+// drifts the first time a review is edited, removed or inserted out of band.
+async function recomputeCreatorRating(creatorId) {
+  await query(
+    `UPDATE mk_creators c SET
+       rating_avg = s.avg, rating_count = s.n, updated_at = now()
+     FROM (SELECT round(avg(rating)::numeric, 2) AS avg, count(*) AS n
+             FROM mk_reviews WHERE creator_id = $1) s
+     WHERE c.id = $1`, [creatorId]);
+}
+
+async function reviewsForCreator(creatorId) {
+  requireDb();
+  const r = await query(
+    `SELECT rv.*, u.display_name AS buyer_name, i.title AS item_title
+       FROM mk_reviews rv
+       LEFT JOIN users u ON u.id = rv.buyer_id
+       LEFT JOIN mk_order_items i ON i.id = rv.order_item_id
+      WHERE rv.creator_id = $1 ORDER BY rv.created_at DESC LIMIT 50`, [creatorId]);
+  const agg = (await query(
+    `SELECT rating_avg, rating_count FROM mk_creators WHERE id = $1`, [creatorId])).rows[0] || {};
+  return {
+    ratingAvg: agg.rating_avg == null ? null : Number(agg.rating_avg),
+    ratingCount: agg.rating_count || 0,
+    reviews: r.rows.map((x) => ({
+      id: x.id, rating: x.rating, body: x.body,
+      buyerName: x.buyer_name || "A buyer", itemTitle: x.item_title,
+      createdAt: msOf(x.created_at),
+    })),
+  };
+}
+
+// Lets the buyer's order view know whether a review is still owed.
+async function reviewForItem(itemId, ctx) {
+  requireDb(); requireUser(ctx);
+  await itemWithRole(itemId, ctx);
+  const r = await query("SELECT rating, body FROM mk_reviews WHERE order_item_id = $1", [itemId]);
+  return { review: r.rows[0] ? { rating: r.rows[0].rating, body: r.rows[0].body } : null };
 }
 
 // ---- Deck persistence (replaces the client's localStorage shim) ------------
@@ -1527,6 +1603,8 @@ const server = http.createServer(async (req, res) => {
       else if (req.method === "GET" && p === "/api/mk/work") result = await ordersForCreator(ctx);
       else if (req.method === "GET" && (m = p.match(/^\/api\/mk\/orders\/([^/]+)$/))) result = await orderGet(decodeURIComponent(m[1]), ctx);
       // Order-item lifecycle — every transition through one funnel.
+      else if (req.method === "POST" && (m = p.match(/^\/api\/mk\/items\/([^/]+)\/review$/))) result = await reviewCreate(decodeURIComponent(m[1]), body, ctx);
+      else if (req.method === "GET" && (m = p.match(/^\/api\/mk\/items\/([^/]+)\/review$/))) result = await reviewForItem(decodeURIComponent(m[1]), ctx);
       else if (req.method === "POST" && (m = p.match(/^\/api\/mk\/items\/([^/]+)\/messages$/))) result = await messageSend(decodeURIComponent(m[1]), body, ctx);
       else if (req.method === "GET" && (m = p.match(/^\/api\/mk\/items\/([^/]+)\/messages$/))) result = await messagesList(decodeURIComponent(m[1]), q, ctx);
       else if (req.method === "GET" && (m = p.match(/^\/api\/mk\/items\/([^/]+)\/messages\/poll$/))) result = await messagesPoll(decodeURIComponent(m[1]), ctx);
