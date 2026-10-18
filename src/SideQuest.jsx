@@ -1773,11 +1773,13 @@ export default function SideQuest() {
             {/* ── User-made lore ── */}
             <div style={{ padding: 16, borderRadius: 12, border: `1px solid ${themeObj.accent}33`, background: "rgba(255,255,255,0.02)" }}>
               <div style={{ fontFamily: themeObj.displayFont, fontWeight: 700, fontSize: 16, color: "#f4f4fa", marginBottom: 4 }}>🪶 Forge your own lore</div>
-              <div style={{ fontSize: 13, color: "#8a8a98", marginBottom: 14 }}>Write your quest from scratch (or tweak a template above), then pin down the specifics.</div>
+              <div style={{ fontSize: 13, color: "#8a8a98", marginBottom: 14 }}>Write or speak your quest from scratch (or tweak a template above), then pin down the specifics.</div>
               <div style={{ fontFamily: UI_FONT, fontSize: 12, letterSpacing: 0.4, textTransform: "uppercase", color: "#8a8a98", marginBottom: 8 }}>Your quest</div>
               <textarea value={questPrompt} onChange={(e) => setQuestPrompt(e.target.value)} rows={7}
                 placeholder="e.g. Dave's bachelor party in Lisbon — complete dares across the city to 'earn back' his freedom before the wedding. He fears seagulls and loves bad karaoke."
                 style={{ ...inputStyle, resize: "vertical", lineHeight: 1.5 }} />
+              <VoiceRecorder accent={themeObj.accent}
+                onText={(text) => setQuestPrompt((prev) => (prev.trim() ? `${prev.trimEnd()}\n${text}` : text))} />
               <div style={{ fontSize: 12, color: "#7a7a88", marginTop: 8 }}>Tip: name the guest of honor, the place, and a couple personal details for sharper cards.</div>
               <GuardrailBuilder guardrails={guardrails} onAdd={addGuardrail} onUpdate={updateGuardrail} onRemove={removeGuardrail} />
             </div>
@@ -2457,6 +2459,104 @@ function VerifyBar({ account, result, onDismiss }) {
       <span style={{ flex: 1, minWidth: 200 }}><span style={{ color: c }}>●</span> {msg}</span>
       {action}
       {result && <button onClick={onDismiss} aria-label="Dismiss" style={{ background: "none", border: "none", color: "#8a8a98", cursor: "pointer", fontSize: 18 }}>×</button>}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// VOICE INPUT
+// ---------------------------------------------------------------------------
+// Speak the quest instead of typing it. The recording is sent once to the
+// backend for transcription and the text lands in the quest box — appended,
+// never replacing what's there — where the user can edit it like anything
+// they typed. Nothing is stored.
+const VOICE_MAX_SECONDS = 180;
+const VOICE_SUPPORTED = typeof window !== "undefined" && !!window.MediaRecorder && !!navigator.mediaDevices?.getUserMedia;
+
+// Browsers disagree on what they can record: Chrome/Firefox do webm/ogg,
+// Safari only mp4. Take the first one this browser supports.
+function pickAudioType() {
+  for (const t of ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"]) {
+    if (window.MediaRecorder.isTypeSupported?.(t)) return t;
+  }
+  return "";
+}
+
+function VoiceRecorder({ onText, accent = "#d8b24a" }) {
+  const [state, setState] = useState("idle");   // idle | recording | transcribing
+  const [secs, setSecs] = useState(0);
+  const [msg, setMsg] = useState("");
+  const recRef = useRef(null);
+  const discardRef = useRef(false);
+
+  // Release the microphone if the user navigates away mid-recording.
+  useEffect(() => () => { try { recRef.current?.stop(); } catch (e) { /* already stopped */ } }, []);
+  useEffect(() => {
+    if (state !== "recording") return;
+    const t0 = Date.now();
+    const iv = setInterval(() => {
+      const s = Math.floor((Date.now() - t0) / 1000);
+      setSecs(s);
+      if (s >= VOICE_MAX_SECONDS) recRef.current?.stop();
+    }, 250);
+    return () => clearInterval(iv);
+  }, [state]);
+
+  if (!API_BASE || !VOICE_SUPPORTED) return null;
+
+  async function start() {
+    setMsg("");
+    let stream;
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+    catch (e) {
+      setMsg(e.name === "NotAllowedError" ? "Microphone access is blocked — allow it from the icon in your browser's address bar, then try again." : "Couldn't find a microphone.");
+      return;
+    }
+    const type = pickAudioType();
+    const rec = new MediaRecorder(stream, type ? { mimeType: type } : undefined);
+    const chunks = [];
+    rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+    rec.onstop = async () => {
+      stream.getTracks().forEach((t) => t.stop());
+      recRef.current = null;
+      if (discardRef.current) { discardRef.current = false; setState("idle"); return; }
+      setState("transcribing");
+      try {
+        const blob = new Blob(chunks, { type: rec.mimeType || type || "audio/webm" });
+        const audio = await new Promise((res, rej) => {
+          const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(blob);
+        });
+        const { text } = await postJSON("/api/transcribe", { audio });
+        if (text && text.trim()) { onText(text.trim()); setMsg("Added to your quest — edit it as you like."); }
+        else setMsg("Didn't catch any words — try again a little closer to the mic.");
+      } catch (e) { setMsg(`Couldn't transcribe that: ${e.message}`); }
+      setState("idle");
+    };
+    recRef.current = rec;
+    discardRef.current = false;
+    setSecs(0);
+    rec.start();
+    setState("recording");
+  }
+  const stop = () => recRef.current?.stop();
+  const cancel = () => { discardRef.current = true; recRef.current?.stop(); };
+  const mmss = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
+  const btn = { fontFamily: UI_FONT, fontSize: 13, padding: "8px 14px", borderRadius: 8, cursor: "pointer", border: `1px solid ${accent}66`, background: "rgba(255,255,255,0.03)", color: "#e8e8f0" };
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginTop: 10 }}>
+      {state === "idle" && <button type="button" onClick={start} style={btn}>🎙 Record instead</button>}
+      {state === "recording" && (<>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 13, color: "#ffb4bd", fontVariantNumeric: "tabular-nums" }}>
+          <span style={{ width: 9, height: 9, borderRadius: 999, background: "#ef5b6b", animation: "sqPulse 1s ease-in-out infinite" }} />
+          Recording {mmss} / {Math.floor(VOICE_MAX_SECONDS / 60)}:00
+        </span>
+        <button type="button" onClick={stop} style={{ ...btn, background: accent, color: "#14121c", border: "none", fontWeight: 600 }}>■ Stop & add</button>
+        <button type="button" onClick={cancel} style={btn}>Cancel</button>
+      </>)}
+      {state === "transcribing" && <span style={{ fontSize: 13, color: "#a8a8b8" }}>Turning your words into text…</span>}
+      {msg && state === "idle" && <span role="status" style={{ fontSize: 12, color: "#9a9aa8" }}>{msg}</span>}
+      <style>{"@keyframes sqPulse{0%,100%{opacity:1}50%{opacity:.25}}"}</style>
     </div>
   );
 }
@@ -3697,7 +3797,8 @@ function Landing({ onOpen, onDemo, savedCount, onDecks, banner, account, onSignI
         <div style={{ marginTop: 8 }}>Every event deserves a deck.</div>
         <div style={{ marginTop: 14, maxWidth: 560, marginLeft: "auto", marginRight: "auto", fontSize: 12, lineHeight: 1.6, color: "#4a4a58" }}>
           To improve how cards are written and painted, we keep anonymised records of the cards people redo or edit —
-          text only, with names removed, never photos — for 90 days.
+          text only, with names removed, never photos — for 90 days. Voice notes are sent to Google's Gemini to be
+          transcribed and are not stored.
         </div>
       </footer>
     </div>

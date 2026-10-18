@@ -1869,6 +1869,49 @@ async function shrinkArt(raw) {
 // Turn an upstream Gemini failure into a message that names what to fix. The
 // two 429s look identical but mean opposite things: `limit: 0` is "this model
 // has no free-tier allocation, the project needs billing", NOT "slow down".
+// ---- Voice notes → text -----------------------------------------------------
+// Lets a user speak their quest instead of typing it. The audio goes to Gemini
+// once, is transcribed, and is never stored — only the text comes back, into
+// the same box the user would have typed in, where they can still edit it.
+const GEMINI_TRANSCRIBE_MODEL = process.env.GEMINI_TRANSCRIBE_MODEL || "gemini-3.5-flash-lite";
+const TRANSCRIBE_MAX_BYTES = 8 * 1024 * 1024;   // ~10 minutes of compressed speech; the UI stops at 3
+const AUDIO_TYPES = new Set(["audio/webm", "audio/ogg", "audio/mp4", "audio/mpeg", "audio/wav", "audio/x-m4a", "audio/aac"]);
+
+async function transcribeAudio({ audio }) {
+  const key = process.env.GOOGLE_API_KEY;
+  if (!key) throw httpErr(503, "Voice input is not configured");
+  const m = /^data:(audio\/[a-zA-Z0-9.+-]+)(?:;[^,]*)?;base64,(.+)$/s.exec(String(audio || ""));
+  if (!m) throw httpErr(422, "audio must be a base64 data URL");
+  const mimeType = m[1].toLowerCase();
+  if (!AUDIO_TYPES.has(mimeType)) throw httpErr(415, `unsupported audio type ${mimeType}`);
+  if (m[2].length * 0.75 > TRANSCRIBE_MAX_BYTES) throw httpErr(413, "recording is too long — keep it under a few minutes");
+
+  const url = `${GEMINI_BASE_URL}/v1beta/models/${GEMINI_TRANSCRIBE_MODEL}:generateContent?key=` + encodeURIComponent(key);
+  const res = await fetchWithTimeout(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      contents: [{ parts: [
+        { inline_data: { mime_type: mimeType, data: m[2] } },
+        // Transcribe, don't rewrite: these are the user's own words about their
+        // own friends, and the lore step does the creative part later.
+        { text: "Transcribe this voice note exactly, in the language it is spoken. " +
+                "Drop filler sounds (um, uh) and false starts; add punctuation; change nothing else. " +
+                "If there is no intelligible speech, return an empty string. Return only the transcript." },
+      ] }],
+      generationConfig: { temperature: 0 },
+    }),
+  });
+  if (!res.ok) {
+    const detail = (await res.text().catch(() => "")).split(key).join("[redacted]");
+    console.error("transcribe upstream error", res.status, detail.slice(0, 300));
+    throw httpErr(502, `Voice transcription failed (${res.status})`);
+  }
+  const body = await res.json();
+  const text = (body?.candidates?.[0]?.content?.parts || []).map((p) => p.text || "").join("").trim();
+  return { text };
+}
+
 function artUpstreamErr(status, upstream) {
   let msg;
   if (status === 429 && /limit:\s*0/.test(upstream)) {
@@ -2222,7 +2265,7 @@ function send(res, status, obj, origin) {
 }
 
 // --- in-memory rate limiter + daily generation cap ------------------------
-const PAID = new Set(["/api/generate-lore", "/api/regenerate-lore", "/api/generate-art", "/api/suggest-cards"]);
+const PAID = new Set(["/api/generate-lore", "/api/regenerate-lore", "/api/generate-art", "/api/suggest-cards", "/api/transcribe"]);
 const hits = new Map(); // ip -> number[] (recent request timestamps, monotonic ms)
 let dayCount = 0;
 let dayStart = 0;
@@ -2349,6 +2392,7 @@ const routes = {
     return { image };
   },
   "POST /api/signals": async (b) => signalFromClient(b),
+  "POST /api/transcribe": async (b) => transcribeAudio(b),
 };
 
 const server = http.createServer(async (req, res) => {
