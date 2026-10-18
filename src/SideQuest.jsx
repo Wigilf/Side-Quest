@@ -367,9 +367,38 @@ async function api(method, pathname, body) {
   if (!res.ok) {
     let msg = `${pathname} ${res.status}`;
     try { const d = await res.json(); if (d.error) msg = d.error; } catch (e) { /* ignore */ }
-    throw new Error(msg);
+    const err = new Error(msg);
+    err.status = res.status;
+    throw err;
   }
   return res.json();
+}
+
+// Run `fn` over `items` with at most `limit` in flight at once, keeping order.
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) { const i = next++; out[i] = await fn(items[i], i); }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
+// Image generation is the one call that gets refused for volume: Google's
+// per-minute image quota, our own per-person rate limit, or a busy server.
+// Those are "try again shortly", not "broken" — so wait and retry a couple of
+// times before giving up on a card.
+const ART_RETRY_DELAYS_MS = [4000, 12000];
+const ART_CONCURRENCY = 3;
+function isTransient(e) {
+  const msg = e?.message || "";
+  if (/no quota|billing/i.test(msg)) return false;           // a setup problem: waiting won't fix it
+  if (e?.status === 429 || e?.status === 503 || e?.status === 504) return true;
+  // 502 is both "Google refused this image" (our message starts "Art service")
+  // and "the server fell over" (from the host) — only the second is worth a retry.
+  if (e?.status === 502) return !/^Art service/.test(msg);
+  return /timeout|failed to fetch|network/i.test(msg);
 }
 const postJSON = (pathname, body) => api("POST", pathname, body);
 
@@ -428,7 +457,7 @@ async function generateCardArt({ photoBase64, frameAccent, themeStyle, seedStr, 
   const haveSubject = !!(photoBase64 || objectMode || lore?.title || category);
   if (API_BASE && haveSubject) {
     try {
-      const d = await postJSON("/api/generate-art", {
+      const body = {
         photoBase64: photoBase64 || undefined,
         category: category || undefined,
         themeStyle,
@@ -438,7 +467,15 @@ async function generateCardArt({ photoBase64, frameAccent, themeStyle, seedStr, 
         // scrub "make Sam older" down to "make [name] older" before storing.
         regen: !!regen, realName: regen ? realName : undefined,
         eventType: EVENT_TYPES.find((e) => e.id === eventType)?.label || eventType || undefined,
-      });
+      };
+      let d;
+      for (let attempt = 0; ; attempt++) {
+        try { d = await postJSON("/api/generate-art", body); break; }
+        catch (e) {
+          if (attempt >= ART_RETRY_DELAYS_MS.length || !isTransient(e)) throw e;
+          await new Promise((r) => setTimeout(r, ART_RETRY_DELAYS_MS[attempt]));
+        }
+      }
       if (d && d.image) return d.image;
       throw new Error("no image");
     } catch (e) {
@@ -1571,8 +1608,10 @@ export default function SideQuest() {
       const th = THEMES.find((t) => t.id === src.theme) || THEMES[1];
       // Flips stay on a fixed, staggered timeline for drama...
       deck.forEach((c, i) => setTimeout(() => setFlipped((s) => ({ ...s, [c.uid]: true })), 250 + i * 220));
-      // ...but paint every card's art in parallel so a large deck isn't stuck in a slow queue.
-      await Promise.all(deck.map(async (c) => {
+      // ...and paint three cards at a time. All at once used to burst past
+      // Google's per-minute image quota and our own rate limit, so a whole
+      // deck fell back to placeholders while a single "New art" worked fine.
+      await mapLimit(deck, ART_CONCURRENCY, async (c) => {
         const part = src.participants.find((p) => p.id === c.pid);
         setLoadingArt((s) => ({ ...s, [c.uid]: true }));
         try {
@@ -1584,7 +1623,7 @@ export default function SideQuest() {
         } finally {
           setLoadingArt((s) => ({ ...s, [c.uid]: false }));
         }
-      }));
+      });
       setGenState("done");
       reportPrefs();
       // Auto-save so the deck survives a refresh — captured locally to avoid stale state.
