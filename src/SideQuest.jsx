@@ -1482,16 +1482,30 @@ export default function SideQuest() {
 
   // Picking a Setting/Occasion (re)composes the quest textarea from the two lores.
   // Setting also drives the visual theme; Occasion also sets the event context.
+  //
+  // The template only replaces the quest text while that text is still the
+  // template (or empty). Once the user has written their own words, picking a
+  // chip must not wipe them.
+  const questIsTemplate = () => !questPrompt.trim() || questPrompt === composeLore(loreSetting, loreOccasion);
   function pickSetting(id) {
     const next = id === loreSetting ? null : id;
     setLoreSetting(next);
-    setQuestPrompt(composeLore(next, loreOccasion));
+    if (questIsTemplate()) setQuestPrompt(composeLore(next, loreOccasion));
     if (next && SETTING_TO_THEME[next]) setTheme(SETTING_TO_THEME[next]);
   }
   function pickOccasion(id) {
     const next = id === loreOccasion ? null : id;
     setLoreOccasion(next);
-    setQuestPrompt(composeLore(loreSetting, next));
+    if (questIsTemplate()) setQuestPrompt(composeLore(loreSetting, next));
+    const occ = EVENT_LORES.find((o) => o.id === next);
+    setEventType(occ ? occ.name : null);
+  }
+  // For people writing their own quest: say what the event is without
+  // touching their text. Same state as the chips, so either way the deck gets
+  // the right lore context and the right "popular for…" suggestions.
+  function setOccasionOnly(id) {
+    const next = id || null;
+    setLoreOccasion(next);
     const occ = EVENT_LORES.find((o) => o.id === next);
     setEventType(occ ? occ.name : null);
   }
@@ -1858,6 +1872,15 @@ export default function SideQuest() {
             <div style={{ padding: 16, borderRadius: 12, border: `1px solid ${themeObj.accent}33`, background: "rgba(255,255,255,0.02)" }}>
               <div style={{ fontFamily: themeObj.displayFont, fontWeight: 700, fontSize: 16, color: "#f4f4fa", marginBottom: 4 }}>🪶 Forge your own lore</div>
               <div style={{ fontSize: 13, color: "#8a8a98", marginBottom: 14 }}>Write or speak your quest from scratch (or tweak a template above), then pin down the specifics.</div>
+              <label style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
+                <span style={{ fontFamily: UI_FONT, fontSize: 12, letterSpacing: 0.4, textTransform: "uppercase", color: "#8a8a98" }}>What's the occasion?</span>
+                <select value={loreOccasion || ""} onChange={(e) => setOccasionOnly(e.target.value)}
+                  style={{ ...inputStyle, width: "auto", minWidth: 200, padding: "8px 12px", fontSize: 14, marginBottom: 0, cursor: "pointer" }}>
+                  <option value="" style={{ background: "#15121d" }}>Choose one (optional)</option>
+                  {EVENT_LORES.map((o) => <option key={o.id} value={o.id} style={{ background: "#15121d" }}>{o.icon} {o.name}</option>)}
+                </select>
+                <span style={{ fontSize: 12, color: "#7a7a88" }}>Helps us tailor the cards — your text stays as you wrote it.</span>
+              </label>
               <div style={{ fontFamily: UI_FONT, fontSize: 12, letterSpacing: 0.4, textTransform: "uppercase", color: "#8a8a98", marginBottom: 8 }}>Your quest</div>
               <textarea value={questPrompt} onChange={(e) => setQuestPrompt(e.target.value)} rows={7}
                 placeholder="e.g. Dave's bachelor party in Lisbon — complete dares across the city to 'earn back' his freedom before the wedding. He fears seagulls and loves bad karaoke."
