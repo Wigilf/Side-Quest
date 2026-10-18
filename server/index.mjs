@@ -37,6 +37,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 })();
 
 const PORT = Number(process.env.PORT || 8787);
+const PROCESS_STARTED_AT = new Date().toISOString();
 // Sonnet 5: near-Opus quality at Sonnet speed/cost ($2/$10 per 1M intro through
 // 2026-08-31). Thinking is disabled below to keep lore generation snappy — Sonnet 5
 // turns adaptive thinking on by default, which would add latency to a user-facing call.
@@ -2582,6 +2583,11 @@ const routes = {
     })(),
     db: dbEnabled(),
     email: !!(RESEND_API_KEY && EMAIL_FROM),
+    // When this process started and how much memory it's using: if users
+    // report "Failed to fetch", a recent startedAt means the server had just
+    // restarted (deploy, crash or wake-up) — the free instance has 512 MB.
+    startedAt: PROCESS_STARTED_AT,
+    memoryMb: Math.round(process.memoryUsage().rss / 1048576),
     model: ANTHROPIC_MODEL,
     imageModel: GEMINI_IMAGE_MODEL,
   }),

@@ -401,6 +401,27 @@ async function shrinkImage(file, maxEdge, quality = 0.85) {
   }
 }
 
+// Saving the deck is the one request a user can't easily redo — the deck
+// exists only on screen until it lands. "Failed to fetch" (no answer at all:
+// the server restarting, waking up, or briefly down) and 5xx/429 are worth
+// waiting out; a 4xx like "too large" is not.
+const SAVE_RETRY_DELAYS_MS = [3000, 8000, 20000];
+async function saveDeckRequest(deck) {
+  for (let attempt = 0; ; attempt++) {
+    try { return await api("POST", "/api/sq/save", { ownerToken: getOwnerToken(), deck }); }
+    catch (e) {
+      const retryable = !e.status || e.status === 429 || e.status >= 500;
+      if (!retryable || attempt >= SAVE_RETRY_DELAYS_MS.length) {
+        if (!e.status) {
+          e.message = "the server didn't respond (tried 4 times). Your deck is still on screen — press ↓ Save deck to try again.";
+        }
+        throw e;
+      }
+      await new Promise((r) => setTimeout(r, SAVE_RETRY_DELAYS_MS[attempt]));
+    }
+  }
+}
+
 // Run `fn` over `items` with at most `limit` in flight at once, keeping order.
 async function mapLimit(items, limit, fn) {
   const out = new Array(items.length);
@@ -1389,7 +1410,7 @@ export default function SideQuest() {
     // whole payload, so we keep owner PII out of it.
     const deck = { id, name, eventType, theme, questPrompt, guardrails, loreSetting, loreOccasion, cardBack, participants, categories, questCard, cards: merged.cards, arts: merged.arts, updatedAt: Date.now() };
     try {
-      const r = await api("POST", "/api/sq/save", { ownerToken: getOwnerToken(), deck });
+      const r = await saveDeckRequest(deck);
       setCurrentDeckId(r.id);
       if (r.collabToken) setCollabToken(r.collabToken);
       setSaveState("saved");
@@ -1684,7 +1705,7 @@ export default function SideQuest() {
       const deck = { id, name, eventType: src.eventType, theme: src.theme, questPrompt, guardrails, loreSetting, loreOccasion, cardBack, participants: src.participants, categories: src.categories || [], questCard: qCard, cards: ordered, arts: curArts, updatedAt: Date.now() };
       (async () => {
         try {
-          const r = await api("POST", "/api/sq/save", { ownerToken: getOwnerToken(), deck });
+          const r = await saveDeckRequest(deck);
           setCurrentDeckId(r.id);
           if (r.collabToken) setCollabToken(r.collabToken);
           refreshDecks();
