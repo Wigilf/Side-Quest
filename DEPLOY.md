@@ -114,6 +114,13 @@ and logged by the webhook; turning that into a shipped deck is the next step in
   tab shows redo rates per version and lets you turn the guide off or restore
   an older one.
 
+- **Popular choices.** Each generated deck records its setup as option ids
+  (occasion, setting, card style, guided-detail types, card categories) — no
+  free text, no account. A paid order (confirmed by the Stripe webhook, never
+  by the browser) counts 4×. Once an occasion has 10 decks, the builder shows
+  a ★ on its top choices — suggestions only, nothing pre-selected. Admin →
+  Preferences shows the numbers and lets you stop any item being suggested.
+
 ---
 
 ## Security notes (important)

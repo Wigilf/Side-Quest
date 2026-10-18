@@ -416,7 +416,7 @@ async function regenerateOneCard({ eventType, theme, questPrompt, card }) {
 // onFallback(message) fires when the backend art call failed and we're returning
 // a procedural backdrop instead — without it a broken key or an exhausted quota
 // looks identical to "the art just renders like that", which hid a real outage.
-async function generateCardArt({ photoBase64, frameAccent, themeStyle, seedStr, lore, refineNote, objectMode, category, onFallback, regen, realName }) {
+async function generateCardArt({ photoBase64, frameAccent, themeStyle, seedStr, lore, refineNote, objectMode, category, onFallback, regen, realName, eventType }) {
   // Two ways to paint a card: from a face photo (portrait mode) or from the
   // card's own lore (text-to-image). A hero card with no photo used to qualify
   // for neither and silently got the flat procedural gradient — which reads as
@@ -437,6 +437,7 @@ async function generateCardArt({ photoBase64, frameAccent, themeStyle, seedStr, 
         // A redo tells the server the previous art missed; the name lets it
         // scrub "make Sam older" down to "make [name] older" before storing.
         regen: !!regen, realName: regen ? realName : undefined,
+        eventType: EVENT_TYPES.find((e) => e.id === eventType)?.label || eventType || undefined,
       });
       if (d && d.image) return d.image;
       throw new Error("no image");
@@ -848,7 +849,7 @@ function SpecCardEditor({ card, onChange, onRemove }) {
   );
 }
 
-function DeckBuilder({ theme, categories, suggestingCat, aiEnabled, onAddCategory, onRemoveCategory, onRenameCategory, onAddCard, onUpdateCard, onRemoveCard, onSuggest }) {
+function DeckBuilder({ theme, categories, suggestingCat, aiEnabled, onAddCategory, onRemoveCategory, onRenameCategory, onAddCard, onUpdateCard, onRemoveCard, onSuggest, popular, occasionName }) {
   const [custom, setCustom] = useState("");
   const usedNames = new Set(categories.map((c) => (c.name || "").toLowerCase()));
   const addCustom = () => { const v = custom.trim(); if (v) { onAddCategory(v); setCustom(""); } };
@@ -891,8 +892,14 @@ function DeckBuilder({ theme, categories, suggestingCat, aiEnabled, onAddCategor
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
           {CATEGORY_PRESET_NAMES.map((n) => {
             const used = usedNames.has(n.toLowerCase());
-            return <button key={n} onClick={() => !used && onAddCategory(n)} disabled={used} style={presetChip(used)}>+ {n}</button>;
+            return <button key={n} onClick={() => !used && onAddCategory(n)} disabled={used} style={presetChip(used)}>+ {n}{!used && isPopular(popular, "category", n) && <PopularStar occasionName={occasionName} />}</button>;
           })}
+          {/* Categories other people invented that caught on — not in the preset list. */}
+          {(popular?.category || [])
+            .filter((n) => !CATEGORY_PRESET_NAMES.some((p) => p.toLowerCase() === String(n).toLowerCase()) && !usedNames.has(String(n).toLowerCase()))
+            .map((n) => (
+              <button key={n} onClick={() => onAddCategory(n)} title={popularLabel(occasionName)} style={presetChip(false)}>+ {n}<PopularStar occasionName={occasionName} /></button>
+            ))}
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <input value={custom} onChange={(e) => setCustom(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addCustom(); }} placeholder="Custom category name…" style={{ flex: 1, boxSizing: "border-box", fontFamily: UI_FONT, fontSize: 13, padding: "9px 11px", borderRadius: 8, color: "#f0f0f6", background: "rgba(0,0,0,0.35)", border: "1px solid #3a3a45", outline: "none" }} />
@@ -916,21 +923,61 @@ function loreChip(active) {
     fontWeight: active ? 700 : 500, transition: "all .15s",
   };
 }
+// ---------------------------------------------------------------------------
+// POPULAR CHOICES — what others planning the same occasion picked
+// ---------------------------------------------------------------------------
+// Suggestions only: a small ★ next to an option, never a pre-selection. The
+// server shows nothing until enough decks exist for the occasion, so one
+// person's taste never gets labelled "popular".
+function usePopular(occasion) {
+  const [data, setData] = useState(null);
+  useEffect(() => {
+    if (!API_BASE) return;
+    let live = true;
+    api("GET", `/api/prefs/popular${occasion ? `?occasion=${encodeURIComponent(occasion)}` : ""}`)
+      .then((d) => { if (live) setData(d?.ready ? d : null); })
+      .catch(() => { if (live) setData(null); });
+    return () => { live = false; };
+  }, [occasion]);
+  return data;
+}
+
+const isPopular = (popular, kind, value) =>
+  !!popular?.[kind]?.some((v) => String(v).toLowerCase() === String(value).toLowerCase());
+const popularLabel = (occasionName) => (occasionName ? `Popular for ${occasionName.toLowerCase()}` : "Popular with Side Quest users");
+
+function PopularStar({ occasionName }) {
+  return (
+    <span title={popularLabel(occasionName)} aria-label={popularLabel(occasionName)}
+      style={{ marginLeft: 6, fontSize: 11, color: "#f3cf5b", fontWeight: 700 }}>★</span>
+  );
+}
+
+function PopularHint({ occasionName }) {
+  return (
+    <div style={{ fontSize: 12, color: "#8a8a98" }}>
+      <span style={{ color: "#f3cf5b" }}>★</span> = {popularLabel(occasionName).toLowerCase()} — especially in decks that got ordered. Just a hint; pick anything.
+    </div>
+  );
+}
+
 // Hoisted out of LoreLibrary so it isn't a fresh component type each render
 // (which would remount the chip lists and reset their scroll on every keystroke).
-function LoreGroup({ label, items, activeId, onPick }) {
+function LoreGroup({ label, items, activeId, onPick, starred, occasionName }) {
   return (
     <div>
       <div style={{ fontFamily: UI_FONT, fontSize: 12, letterSpacing: 0.4, textTransform: "uppercase", color: "#8a8a98", marginBottom: 8 }}>{label}</div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, padding: "1px 2px 4px" }}>
         {items.map((it) => (
-          <button key={it.id} onClick={() => onPick(it.id)} style={loreChip(it.id === activeId)}>{it.icon} {it.name}</button>
+          <button key={it.id} onClick={() => onPick(it.id)} style={loreChip(it.id === activeId)}>
+            {it.icon} {it.name}{starred?.(it.id) && <PopularStar occasionName={occasionName} />}
+          </button>
         ))}
       </div>
     </div>
   );
 }
-function LoreLibrary({ settingId, occasionId, onPickSetting, onPickOccasion, t }) {
+function LoreLibrary({ settingId, occasionId, onPickSetting, onPickOccasion, t, popular, occasionName }) {
   const Group = LoreGroup;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16, padding: 16, borderRadius: 12, border: "1px solid #2a2a33", background: "rgba(255,255,255,0.02)" }}>
@@ -938,7 +985,9 @@ function LoreLibrary({ settingId, occasionId, onPickSetting, onPickOccasion, t }
         <div style={{ fontFamily: (t && t.displayFont) || UI_FONT, fontWeight: 700, fontSize: 16, color: "#f4f4fa", marginBottom: 4 }}>✨ Ready-made lores</div>
         <div style={{ fontSize: 13, color: "#8a8a98", lineHeight: 1.4 }}>Pick a <strong>setting</strong> and an <strong>occasion</strong> — we auto-write the quest and match the card style. Tap again to deselect.</div>
       </div>
-      <Group label="Setting — the world" items={SETTING_LORES} activeId={settingId} onPick={onPickSetting} />
+      <Group label="Setting — the world" items={SETTING_LORES} activeId={settingId} onPick={onPickSetting}
+        starred={(id) => isPopular(popular, "setting", id)} occasionName={occasionName} />
+      {popular && <PopularHint occasionName={occasionName} />}
       <Group label="Occasion — the vibe" items={EVENT_LORES} activeId={occasionId} onPick={onPickOccasion} />
     </div>
   );
@@ -946,7 +995,7 @@ function LoreLibrary({ settingId, occasionId, onPickSetting, onPickOccasion, t }
 
 // Compact visual-theme picker. A chosen Setting sets this automatically; writing
 // your own quest? Pick the card look here.
-function CardStylePicker({ themeId, onPick }) {
+function CardStylePicker({ themeId, onPick, popular, occasionName }) {
   return (
     <div style={{ margin: "20px 0 4px" }}>
       <div style={{ fontFamily: UI_FONT, fontSize: 12, letterSpacing: 0.4, textTransform: "uppercase", color: "#8a8a98", marginBottom: 8 }}>Card style <span style={{ textTransform: "none", letterSpacing: 0, color: "#6c6c78" }}>— how the cards look (a setting sets this for you)</span></div>
@@ -962,6 +1011,7 @@ function CardStylePicker({ themeId, onPick }) {
                 {t.swatch.map((c, i) => <span key={i} style={{ width: 10, height: 10, borderRadius: 3, background: c, border: "1px solid rgba(255,255,255,0.12)" }} />)}
               </span>
               <span style={{ fontFamily: UI_FONT, fontSize: 13, color: active ? t.accent : "#dcdce4", fontWeight: active ? 700 : 500, whiteSpace: "nowrap" }}>{t.label}</span>
+              {isPopular(popular, "theme", t.id) && <PopularStar occasionName={occasionName} />}
             </button>
           );
         })}
@@ -973,7 +1023,9 @@ function CardStylePicker({ themeId, onPick }) {
 // ---------------------------------------------------------------------------
 // GUIDED LORE BUILDER (guardrails) + CARD BACK
 // ---------------------------------------------------------------------------
-function GuardrailBuilder({ guardrails, onAdd, onUpdate, onRemove }) {
+function GuardrailBuilder({ guardrails, onAdd, onUpdate, onRemove, popular, occasionName }) {
+  const used = new Set(guardrails.map((g) => g.type));
+  const suggested = (popular?.guardrail || []).filter((t) => !used.has(t) && GUARDRAIL_TYPES.some((x) => x.id === t));
   const inp = { width: "100%", boxSizing: "border-box", fontFamily: UI_FONT, fontSize: 13, padding: "8px 10px", borderRadius: 8, color: "#f0f0f6", background: "rgba(0,0,0,0.4)", border: "1px solid #3a3a45", outline: "none" };
   return (
     <div style={{ marginTop: 18, padding: 16, borderRadius: 12, border: "1px dashed #44444f" }}>
@@ -1004,7 +1056,15 @@ function GuardrailBuilder({ guardrails, onAdd, onUpdate, onRemove }) {
           })}
         </div>
       )}
-      <button onClick={() => onAdd("setting")} style={{ fontFamily: UI_FONT, fontSize: 13, fontWeight: 500, padding: "8px 14px", borderRadius: 8, cursor: "pointer", color: "#e8e8f0", background: "rgba(255,255,255,0.05)", border: "1px solid #3a3a45" }}>＋ Add a detail</button>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+        <button onClick={() => onAdd("setting")} style={{ fontFamily: UI_FONT, fontSize: 13, fontWeight: 500, padding: "8px 14px", borderRadius: 8, cursor: "pointer", color: "#e8e8f0", background: "rgba(255,255,255,0.05)", border: "1px solid #3a3a45" }}>＋ Add a detail</button>
+        {suggested.length > 0 && (<>
+          <span style={{ fontSize: 12, color: "#8a8a98" }}><span style={{ color: "#f3cf5b" }}>★</span> {popularLabel(occasionName)}:</span>
+          {suggested.map((t) => (
+            <button key={t} onClick={() => onAdd(t)} style={{ fontFamily: UI_FONT, fontSize: 12, padding: "5px 11px", borderRadius: 999, cursor: "pointer", color: "#f3cf5b", background: "rgba(243,207,91,0.06)", border: "1px solid #f3cf5b44" }}>+ {guardrailLabel(t)}</button>
+          ))}
+        </>)}
+      </div>
     </div>
   );
 }
@@ -1112,6 +1172,11 @@ export default function SideQuest() {
   const [cardBackOpen, setCardBackOpen] = useState(false);
   const [loreSetting, setLoreSetting] = useState(null);   // selected Setting lore id
   const [loreOccasion, setLoreOccasion] = useState(null); // selected Occasion lore id
+  // Identifies this deck-in-progress in preference stats, so regenerating it
+  // ten times still counts as one deck. A saved deck reuses its own id.
+  const prefsKeyRef = useRef(newId());
+  const popular = usePopular(loreOccasion);
+  const occasionName = EVENT_LORES.find((o) => o.id === loreOccasion)?.name || null;
   const [categories, setCategories] = useState([]); // [{ id, name, cards: [specCard] }]
   const [suggestingCat, setSuggestingCat] = useState(null); // category id currently fetching AI suggestions
   const [cards, setCards] = useState([]);
@@ -1217,6 +1282,7 @@ export default function SideQuest() {
         deckName: (questPrompt || "").slice(0, 60) || "Side Quest custom deck",
         cardCount: cards.length,
         quantity: 1,
+        prefs: { ...prefsSnapshot(), cards: cards.slice(0, 30).map((c) => ({ realName: c.realName, title: c.title, typeLine: c.typeLine, ability: c.ability, flavor: c.flavor })) },
       });
       if (d && d.checkoutUrl) { window.location.href = d.checkoutUrl; return; }
       throw new Error("no checkout URL returned");
@@ -1257,7 +1323,7 @@ export default function SideQuest() {
     const merged = await mergeCollabCards(cards, arts);
     // Note: `user` is intentionally NOT saved — shared/collab links return the
     // whole payload, so we keep owner PII out of it.
-    const deck = { id, name, eventType, theme, questPrompt, guardrails, cardBack, participants, categories, questCard, cards: merged.cards, arts: merged.arts, updatedAt: Date.now() };
+    const deck = { id, name, eventType, theme, questPrompt, guardrails, loreSetting, loreOccasion, cardBack, participants, categories, questCard, cards: merged.cards, arts: merged.arts, updatedAt: Date.now() };
     try {
       const r = await api("POST", "/api/sq/save", { ownerToken: getOwnerToken(), deck });
       setCurrentDeckId(r.id);
@@ -1345,7 +1411,8 @@ export default function SideQuest() {
     setUser(d.user || { name: "", email: "" });
     setEventType(d.eventType); setTheme(d.theme); setQuestPrompt(d.questPrompt || "");
     setParticipants(d.participants || []); setQuestCard(d.questCard || null);
-    setCategories(d.categories || []); setLoreSetting(null); setLoreOccasion(null);
+    setCategories(d.categories || []); setLoreSetting(d.loreSetting || null); setLoreOccasion(d.loreOccasion || null);
+    if (d.id) prefsKeyRef.current = String(d.id);
     setGuardrails(d.guardrails || []); setCardBack(d.cardBack || { type: "theme" });
     const loaded = (d.cards || []).map((c, i) => {
       if (c.uid) return c;
@@ -1379,6 +1446,7 @@ export default function SideQuest() {
     setCurrentDeckId(null); setUser({ name: "", email: "" }); setEventType(null);
     setTheme(null); setQuestPrompt(""); setParticipants([]); setQuestCard(null); setCategories([]);
     setLoreSetting(null); setLoreOccasion(null); setGuardrails([]); setCardBack({ type: "theme" }); setCardBackOpen(false);
+    prefsKeyRef.current = newId();
     setCards([]); setArts({}); setFlipped({}); setGenState("idle"); setOrderPlaced(false); setPhotoConsent(false);
     setCollabToken(null); setCollabEnabled(false); setCollabMode(false); setShareOpen(false); setCollabNew(0);
     setShowDecks(false); setLanding(false); setStep(0);
@@ -1497,18 +1565,34 @@ export default function SideQuest() {
           const frAccent = (CARD_FRAMES.find((f) => f.key === c.frame) || CARD_FRAMES[0]).accent;
           // With a backend + photo -> real face->character art; otherwise a themed
           // backdrop the card layers the raw photo over.
-          const art = await generateCardArt({ photoBase64: part?.photo || null, frameAccent: frAccent, themeStyle: th.style, seedStr: c.realName + c.title, lore: c, objectMode: !c.pid && !!c.category, category: c.category, onFallback: (m) => setError(`Card art fell back to a placeholder: ${m}`) });
+          const art = await generateCardArt({ photoBase64: part?.photo || null, frameAccent: frAccent, themeStyle: th.style, seedStr: c.realName + c.title, lore: c, objectMode: !c.pid && !!c.category, category: c.category, onFallback: (m) => setError(`Card art fell back to a placeholder: ${m}`), eventType: src.eventType });
           setArts((s) => ({ ...s, [c.uid]: art }));
         } finally {
           setLoadingArt((s) => ({ ...s, [c.uid]: false }));
         }
       }));
       setGenState("done");
+      reportPrefs();
       // Auto-save so the deck survives a refresh — captured locally to avoid stale state.
       setTimeout(() => autoSave(src, lore.questCard, deck), 400);
     } catch (e) {
       console.error(e); setError(e.message || "Generation failed"); setGenState("error");
     }
+  }
+
+  // The deck's setup as option ids — never the text the user wrote — for
+  // "popular for this occasion" suggestions.
+  function prefsSnapshot() {
+    return {
+      // The style the deck actually rendered in — unpicked means the default.
+      deckKey: prefsKeyRef.current, occasion: loreOccasion, setting: loreSetting, theme: themeObj.id,
+      guardrails: guardrails.filter((g) => (g.details || "").trim()).map((g) => g.type),
+      categories: categories.map((c) => c.name),
+    };
+  }
+  function reportPrefs() {
+    if (!API_BASE) return;
+    postJSON("/api/prefs", { stage: "generated", ...prefsSnapshot() }).catch(() => {});
   }
 
   // Collects the latest art from state at call time and saves the deck to the server.
@@ -1517,7 +1601,7 @@ export default function SideQuest() {
     setArts((curArts) => {
       const id = currentDeckId || newId();
       const name = (src.questPrompt || "").slice(0, 42) || src.eventType || "Untitled deck";
-      const deck = { id, name, eventType: src.eventType, theme: src.theme, questPrompt, guardrails, cardBack, participants: src.participants, categories: src.categories || [], questCard: qCard, cards: ordered, arts: curArts, updatedAt: Date.now() };
+      const deck = { id, name, eventType: src.eventType, theme: src.theme, questPrompt, guardrails, loreSetting, loreOccasion, cardBack, participants: src.participants, categories: src.categories || [], questCard: qCard, cards: ordered, arts: curArts, updatedAt: Date.now() };
       (async () => {
         try {
           const r = await api("POST", "/api/sq/save", { ownerToken: getOwnerToken(), deck });
@@ -1601,7 +1685,7 @@ export default function SideQuest() {
       const card = cards.find((c) => c.uid === uid);
       const part = participants.find((p) => p.id === card.pid);
       const frAccent = (CARD_FRAMES.find((f) => f.key === card.frame) || CARD_FRAMES[0]).accent;
-      const art = await generateCardArt({ photoBase64: part?.photo || null, frameAccent: frAccent, themeStyle: themeObj.style, seedStr: card.realName + card.title + Math.random(), lore: card, refineNote, objectMode: !card.pid && !!card.category, category: card.category, onFallback: (m) => setError(`Card art fell back to a placeholder: ${m}`), regen: true, realName: card.realName });
+      const art = await generateCardArt({ photoBase64: part?.photo || null, frameAccent: frAccent, themeStyle: themeObj.style, seedStr: card.realName + card.title + Math.random(), lore: card, refineNote, objectMode: !card.pid && !!card.category, category: card.category, onFallback: (m) => setError(`Card art fell back to a placeholder: ${m}`), regen: true, realName: card.realName, eventType });
       setArts((s) => ({ ...s, [uid]: art }));
     } catch (e) { setError(e.message); } finally { setLoadingArt((s) => ({ ...s, [uid]: false })); setBusyCard(null); }
   }
@@ -1762,7 +1846,7 @@ export default function SideQuest() {
         {step === 0 && (
           <Panel title="Set the scene" sub="Grab a ready-made world, or forge your own lore from scratch — either way we spin it into your deck.">
             {/* ── Preset AI lores ── */}
-            <LoreLibrary settingId={loreSetting} occasionId={loreOccasion} onPickSetting={pickSetting} onPickOccasion={pickOccasion} t={themeObj} />
+            <LoreLibrary settingId={loreSetting} occasionId={loreOccasion} onPickSetting={pickSetting} onPickOccasion={pickOccasion} t={themeObj} popular={popular} occasionName={occasionName} />
 
             <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "20px 0" }}>
               <div style={{ flex: 1, height: 1, background: "#2c2c36" }} />
@@ -1781,10 +1865,10 @@ export default function SideQuest() {
               <VoiceRecorder accent={themeObj.accent}
                 onText={(text) => setQuestPrompt((prev) => (prev.trim() ? `${prev.trimEnd()}\n${text}` : text))} />
               <div style={{ fontSize: 12, color: "#7a7a88", marginTop: 8 }}>Tip: name the guest of honor, the place, and a couple personal details for sharper cards.</div>
-              <GuardrailBuilder guardrails={guardrails} onAdd={addGuardrail} onUpdate={updateGuardrail} onRemove={removeGuardrail} />
+              <GuardrailBuilder guardrails={guardrails} onAdd={addGuardrail} onUpdate={updateGuardrail} onRemove={removeGuardrail} popular={popular} occasionName={occasionName} />
             </div>
 
-            <CardStylePicker themeId={theme || "lotr"} onPick={setTheme} />
+            <CardStylePicker themeId={theme || "lotr"} onPick={setTheme} popular={popular} occasionName={occasionName} />
             <NavRow onNext={() => setStep(1)} nextOk={canNext[0]} />
           </Panel>
         )}
@@ -1843,6 +1927,8 @@ export default function SideQuest() {
               onUpdateCard={updateSpecCard}
               onRemoveCard={removeSpecCard}
               onSuggest={suggestForCategory}
+              popular={popular}
+              occasionName={occasionName}
             />
             <NavRow onBack={() => setStep(1)} onNext={() => runGeneration()} nextOk nextLabel="✦ Generate deck" />
           </Panel>
@@ -2655,8 +2741,10 @@ function AdminView({ onClose, account, onSignIn, initialTab = "applications" }) 
           {tabBtn("applications", "Creators")}
           {tabBtn("disputes", "Disputes")}
           {tabBtn("style", "House style")}
+          {tabBtn("prefs", "Preferences")}
         </div>
-        {tab === "applications" ? <AdminCreators /> : tab === "disputes" ? <AdminDisputes account={account} /> : <AdminStyle />}
+        {tab === "applications" ? <AdminCreators /> : tab === "disputes" ? <AdminDisputes account={account} />
+          : tab === "style" ? <AdminStyle /> : <AdminPrefs />}
       </>)}
     </MarketShell>
   );
@@ -2865,6 +2953,7 @@ function AdminStyle() {
                 Include
               </label>
               {areaChip(r.area)}
+              {r.occasion && <span style={{ fontSize: 11, color: "#c8c8d4" }}>only for: {r.occasion}</span>}
               <span style={{ fontSize: 11, color: r.status === "new" ? "#4ade80" : r.status === "changed" ? "#f3cf5b" : "#6c6c78" }}>{r.status}</span>
             </div>
             <textarea value={r.text} onChange={(e) => setDraft((d) => d.map((x, j) => (j === i ? { ...x, text: e.target.value } : x)))}
@@ -2908,7 +2997,11 @@ function AdminStyle() {
       {data.active ? (<>
         <div style={sub}>Activated {data.active.decidedAt ? fmtRelative(data.active.decidedAt) : "—"}</div>
         <div style={{ marginTop: 10 }}>
-          {data.active.rules.map((r, i) => <div key={i} style={{ fontSize: 14, lineHeight: 1.6, padding: "5px 0" }}>{areaChip(r.area)}{r.text}</div>)}
+          {data.active.rules.map((r, i) => (
+            <div key={i} style={{ fontSize: 14, lineHeight: 1.6, padding: "5px 0" }}>
+              {areaChip(r.area)}{r.occasion && <span style={{ fontSize: 11, color: "#8a8a98", marginRight: 8 }}>[{r.occasion}]</span>}{r.text}
+            </div>
+          ))}
         </div>
         <GhostButton disabled={busy} onClick={() => run("POST", "/api/mk/admin/style/deactivate")} style={{ marginTop: 12, padding: "8px 14px", fontSize: 13 }}>Turn off (back to no guide)</GhostButton>
       </>) : <div style={sub}>Cards are generated from the base instructions only.</div>}
@@ -2948,6 +3041,71 @@ function AdminStyle() {
         ))}
       </div>
     )}
+  </>);
+}
+
+// What people choose, per occasion: the numbers behind the ★ suggestions, and
+// a switch to stop promoting anything you don't want pushed.
+function AdminPrefs() {
+  const [occasion, setOccasion] = useState("");
+  const [data, setData] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  async function load(occ = occasion) {
+    try { setData(await api("GET", `/api/mk/admin/prefs${occ ? `?occasion=${encodeURIComponent(occ)}` : ""}`)); setErr(""); }
+    catch (e) { setErr(e.message); }
+  }
+  useEffect(() => { load(occasion); /* eslint-disable-next-line */ }, [occasion]);
+  async function toggle(kind, value, hidden) {
+    setBusy(true);
+    try { setData(await api("POST", "/api/mk/admin/prefs/hide", { kind, value, hidden, occasion: occasion || undefined })); }
+    catch (e) { setErr(e.message); }
+    setBusy(false);
+  }
+  if (!data) return err ? <div style={{ color: "#ffc4cb" }}>⚠ {err}</div> : <div style={{ color: "#6c6c78" }}>Loading…</div>;
+
+  const occName = (id) => EVENT_LORES.find((o) => o.id === id)?.name || id;
+  const label = {
+    setting: (v) => SETTING_LORES.find((x) => x.id === v)?.name || v,
+    theme: (v) => THEMES.find((x) => x.id === v)?.label || v,
+    guardrail: (v) => guardrailLabel(v),
+    category: (v) => v,
+  };
+  const ready = data.decks >= data.minDecks;
+  const section = (kind, title) => (
+    <div style={{ background: "rgba(255,255,255,0.025)", border: "1px solid #2c2c36", borderRadius: 16, padding: 18, marginBottom: 14 }}>
+      <div style={{ fontFamily: DISPLAY_FONT, fontSize: 17, marginBottom: 10 }}>{title}</div>
+      {data[kind].length === 0 && <div style={{ color: "#6c6c78", fontSize: 13 }}>No data yet.</div>}
+      {data[kind].slice(0, 10).map((r, i) => {
+        const shown = ready && !r.hidden && r.generated >= data.minPerOption && data[kind].filter((x) => !x.hidden && x.generated >= data.minPerOption).indexOf(r) < 3;
+        return (
+          <div key={r.value} style={{ display: "flex", alignItems: "center", gap: 12, padding: "7px 0", borderTop: i ? "1px solid #1e1e28" : "none", fontSize: 14, opacity: r.hidden ? 0.5 : 1, flexWrap: "wrap" }}>
+            <span style={{ flex: 1, minWidth: 140 }}>{label[kind](r.value)}{shown && <PopularStar occasionName={occasion ? occName(occasion) : null} />}</span>
+            <span style={{ color: "#8a8a98", fontSize: 13, fontVariantNumeric: "tabular-nums" }}>{r.generated} deck{r.generated === 1 ? "" : "s"} · {r.ordered} ordered</span>
+            <button disabled={busy} onClick={() => toggle(kind, r.value, !r.hidden)} style={{ ...navBtn, padding: "4px 10px", fontSize: 12 }}>{r.hidden ? "Allow" : "Never suggest"}</button>
+          </div>
+        );
+      })}
+    </div>
+  );
+  return (<>
+    {err && <div style={{ color: "#ffc4cb", marginBottom: 14 }}>⚠ {err}</div>}
+    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
+      <button onClick={() => setOccasion("")} style={{ ...navBtn, fontSize: 12, padding: "6px 12px", borderColor: !occasion ? "#d8b24a" : "#2c2c36", color: !occasion ? "#f3cf5b" : "#9a9aa8" }}>All occasions</button>
+      {data.occasions.map((o) => (
+        <button key={o.occasion} onClick={() => setOccasion(o.occasion)} style={{ ...navBtn, fontSize: 12, padding: "6px 12px", borderColor: occasion === o.occasion ? "#d8b24a" : "#2c2c36", color: occasion === o.occasion ? "#f3cf5b" : "#9a9aa8" }}>
+          {occName(o.occasion)} ({o.decks})
+        </button>
+      ))}
+    </div>
+    <div style={{ color: "#8a8a98", fontSize: 13, lineHeight: 1.6, marginBottom: 18 }}>
+      {data.decks} deck{data.decks === 1 ? "" : "s"} · {data.ordered} ordered.{" "}
+      {ready ? "★ marks what users currently see suggested (top 3, ordered decks count 4×)." : `Suggestions appear once there are ${data.minDecks} decks here — nothing is shown to users yet.`}
+    </div>
+    {section("setting", "Settings")}
+    {section("theme", "Card styles")}
+    {section("guardrail", "Guided details")}
+    {section("category", "Card categories")}
   </>);
 }
 
@@ -3797,8 +3955,9 @@ function Landing({ onOpen, onDemo, savedCount, onDecks, banner, account, onSignI
         <div style={{ marginTop: 8 }}>Every event deserves a deck.</div>
         <div style={{ marginTop: 14, maxWidth: 560, marginLeft: "auto", marginRight: "auto", fontSize: 12, lineHeight: 1.6, color: "#4a4a58" }}>
           To improve how cards are written and painted, we keep anonymised records of the cards people redo or edit —
-          text only, with names removed, never photos — for 90 days. Voice notes are sent to Google's Gemini to be
-          transcribed and are not stored.
+          text only, with names removed, never photos — for 90 days. We also count which options decks use (occasion,
+          style, card categories), with no names or accounts attached, to suggest popular choices to others. Voice notes
+          are sent to Google's Gemini to be transcribed and are not stored.
         </div>
       </footer>
     </div>

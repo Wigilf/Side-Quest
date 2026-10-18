@@ -372,6 +372,42 @@ async function migrateStyleLearning() {
     -- At most one guide is live.
     CREATE UNIQUE INDEX IF NOT EXISTS style_guides_one_active ON style_guides(status) WHERE status = 'active';
   `);
+
+  // What people CHOOSE, per occasion, so a newcomer planning the same kind of
+  // event can be shown what worked for others. Only option ids and short
+  // category names — no free text, no user id. One row per deck per stage, so
+  // a deck regenerated ten times still counts once.
+  await query(`
+    CREATE TABLE IF NOT EXISTS pref_snapshots (
+      id text PRIMARY KEY,
+      deck_key text NOT NULL,
+      -- generated: the user got as far as a full deck.
+      -- checkout: they clicked Order (not yet trusted).
+      -- ordered: Stripe confirmed payment for that checkout.
+      stage text NOT NULL CHECK (stage IN ('generated','checkout','ordered')),
+      occasion text,
+      setting text,
+      theme text,
+      guardrails text[] NOT NULL DEFAULT '{}',
+      categories text[] NOT NULL DEFAULT '{}',
+      -- Card text from ordered decks (names removed): positive examples for
+      -- the house-style distiller. Kept only on checkout/ordered rows.
+      cards jsonb,
+      stripe_session_id text,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      UNIQUE (deck_key, stage)
+    );
+    CREATE INDEX IF NOT EXISTS pref_snapshots_occasion_idx ON pref_snapshots(occasion, stage);
+    CREATE INDEX IF NOT EXISTS pref_snapshots_session_idx ON pref_snapshots(stripe_session_id);
+
+    -- Suggestions an operator chose never to promote.
+    CREATE TABLE IF NOT EXISTS pref_hidden (
+      kind text NOT NULL,
+      value text NOT NULL,
+      hidden_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY (kind, value)
+    );
+  `);
 }
 
 // ---------------------------------------------------------------------------
