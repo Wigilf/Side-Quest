@@ -389,8 +389,8 @@ async function mapLimit(items, limit, fn) {
 // per-minute image quota, our own per-person rate limit, or a busy server.
 // Those are "try again shortly", not "broken" — so wait and retry a couple of
 // times before giving up on a card.
-const ART_RETRY_DELAYS_MS = [4000, 12000];
-const ART_CONCURRENCY = 3;
+const ART_RETRY_DELAYS_MS = [4000, 12000, 25000];
+const ART_CONCURRENCY = 6;
 function isTransient(e) {
   const msg = e?.message || "";
   if (/no quota|billing/i.test(msg)) return false;           // a setup problem: waiting won't fix it
@@ -1608,7 +1608,7 @@ export default function SideQuest() {
       const th = THEMES.find((t) => t.id === src.theme) || THEMES[1];
       // Flips stay on a fixed, staggered timeline for drama...
       deck.forEach((c, i) => setTimeout(() => setFlipped((s) => ({ ...s, [c.uid]: true })), 250 + i * 220));
-      // ...and paint three cards at a time. All at once used to burst past
+      // ...and paint six cards at a time. All at once used to burst past
       // Google's per-minute image quota and our own rate limit, so a whole
       // deck fell back to placeholders while a single "New art" worked fine.
       await mapLimit(deck, ART_CONCURRENCY, async (c) => {

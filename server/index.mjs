@@ -2452,13 +2452,20 @@ let dayStart = 0;
 
 function nowMs() { return Number(process.hrtime.bigint() / 1_000_000n); }
 
-function rateLimited(ip) {
+// Art has its own allowance: one deck legitimately asks for an image per
+// card, and sharing the general bucket meant a big deck used up the limit for
+// everything else (and the rest of its own cards). The daily cap still bounds
+// total spend.
+const ART_RATE_MAX = Number(process.env.ART_RATE_MAX || 60);
+
+function rateLimited(ip, bucket = "general") {
   const t = nowMs();
-  const arr = (hits.get(ip) || []).filter((ts) => t - ts < RATE_WINDOW_MS);
+  const key = `${bucket}:${ip}`;
+  const arr = (hits.get(key) || []).filter((ts) => t - ts < RATE_WINDOW_MS);
   arr.push(t);
-  hits.set(ip, arr);
+  hits.set(key, arr);
   if (hits.size > 5000) hits.clear(); // crude memory bound
-  return arr.length > RATE_MAX;
+  return arr.length > (bucket === "art" ? ART_RATE_MAX : RATE_MAX);
 }
 
 function overDailyCap() {
@@ -2618,7 +2625,7 @@ const server = http.createServer(async (req, res) => {
       if (auth !== `Bearer ${API_TOKEN}`) { send(res, 401, { error: "unauthorized" }, origin); return; }
     }
     const ip = (req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.socket.remoteAddress || "unknown";
-    if (rateLimited(ip)) { send(res, 429, { error: "rate_limited — slow down" }, origin); return; }
+    if (rateLimited(ip, p === "/api/generate-art" ? "art" : "general")) { send(res, 429, { error: "rate_limited — slow down" }, origin); return; }
     if (PAID.has(p) && overDailyCap()) { send(res, 429, { error: "daily generation cap reached" }, origin); return; }
   }
 
