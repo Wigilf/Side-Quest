@@ -416,7 +416,7 @@ async function regenerateOneCard({ eventType, theme, questPrompt, card }) {
 // onFallback(message) fires when the backend art call failed and we're returning
 // a procedural backdrop instead — without it a broken key or an exhausted quota
 // looks identical to "the art just renders like that", which hid a real outage.
-async function generateCardArt({ photoBase64, frameAccent, themeStyle, seedStr, lore, refineNote, objectMode, category, onFallback }) {
+async function generateCardArt({ photoBase64, frameAccent, themeStyle, seedStr, lore, refineNote, objectMode, category, onFallback, regen, realName }) {
   // Two ways to paint a card: from a face photo (portrait mode) or from the
   // card's own lore (text-to-image). A hero card with no photo used to qualify
   // for neither and silently got the flat procedural gradient — which reads as
@@ -434,6 +434,9 @@ async function generateCardArt({ photoBase64, frameAccent, themeStyle, seedStr, 
         themeStyle,
         lore: { title: lore?.title, typeLine: lore?.typeLine },
         refineNote: refineNote || "",
+        // A redo tells the server the previous art missed; the name lets it
+        // scrub "make Sam older" down to "make [name] older" before storing.
+        regen: !!regen, realName: regen ? realName : undefined,
       });
       if (d && d.image) return d.image;
       throw new Error("no image");
@@ -744,14 +747,31 @@ function CardRefiner({ fr, busy, onRegenArt, onRegenLore }) {
 }
 
 // Enlarged view: a big card + editable fields. Opens on double-click of a card.
-function CardEditorModal({ card, theme, art, photo, loadingArt, busy, onClose, onChange, onRegenArt, onRegenLore }) {
+function CardEditorModal({ card, theme, eventType, art, photo, loadingArt, busy, onClose: closeModal, onChange, onRegenArt, onRegenLore }) {
   const fr = CARD_FRAMES.find((f) => f.key === card.frame) || CARD_FRAMES[0];
   const [note, setNote] = useState("");
+  // What the card said before the user touched it, so closing the editor can
+  // report how they rewrote it — the clearest lesson in what the AI got wrong.
+  // Re-snapshotted after an AI regen, so the AI's own rewrite isn't counted
+  // as the user's.
+  const startRef = useRef(card);
+  const cardRef = useRef(card);
+  cardRef.current = card;
+  useEffect(() => { if (!busy) startRef.current = cardRef.current; }, [busy]);
+  const onClose = () => {
+    const before = startRef.current, after = cardRef.current;
+    if (API_BASE && ["title", "typeLine", "ability", "flavor"].some((k) => (before[k] || "") !== (after[k] || ""))) {
+      postJSON("/api/signals", { kind: "card_edit", before, after, realName: after.realName, theme: theme?.label, eventType }).catch(() => {});
+    }
+    closeModal();
+  };
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
   useEffect(() => {
-    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    const onKey = (e) => { if (e.key === "Escape") closeRef.current(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, []);
   const lbl = { display: "block", fontFamily: UI_FONT, fontSize: 11, letterSpacing: 0.4, textTransform: "uppercase", color: "#9a9aa8", marginBottom: 4 };
   const inp = { width: "100%", boxSizing: "border-box", fontFamily: UI_FONT, fontSize: 13, padding: "8px 10px", borderRadius: 8, color: "#f0f0f6", background: "rgba(0,0,0,0.4)", border: `1px solid ${fr.accent}55`, outline: "none" };
   const setText = (k) => (e) => onChange({ [k]: e.target.value });
@@ -1581,7 +1601,7 @@ export default function SideQuest() {
       const card = cards.find((c) => c.uid === uid);
       const part = participants.find((p) => p.id === card.pid);
       const frAccent = (CARD_FRAMES.find((f) => f.key === card.frame) || CARD_FRAMES[0]).accent;
-      const art = await generateCardArt({ photoBase64: part?.photo || null, frameAccent: frAccent, themeStyle: themeObj.style, seedStr: card.realName + card.title + Math.random(), lore: card, refineNote, objectMode: !card.pid && !!card.category, category: card.category, onFallback: (m) => setError(`Card art fell back to a placeholder: ${m}`) });
+      const art = await generateCardArt({ photoBase64: part?.photo || null, frameAccent: frAccent, themeStyle: themeObj.style, seedStr: card.realName + card.title + Math.random(), lore: card, refineNote, objectMode: !card.pid && !!card.category, category: card.category, onFallback: (m) => setError(`Card art fell back to a placeholder: ${m}`), regen: true, realName: card.realName });
       setArts((s) => ({ ...s, [uid]: art }));
     } catch (e) { setError(e.message); } finally { setLoadingArt((s) => ({ ...s, [uid]: false })); setBusyCard(null); }
   }
@@ -1595,10 +1615,12 @@ export default function SideQuest() {
   // Where a notification (or the admin button) takes you. Every page reads
   // this from context, so the bell works the same in any header.
   const [focusOrderId, setFocusOrderId] = useState("");
+  const [adminTab, setAdminTab] = useState("applications");
   const nav = {
     account,
-    go: (target, { orderId } = {}) => {
+    go: (target, { orderId, tab } = {}) => {
       setFocusOrderId(target === "orders" && orderId ? orderId : "");
+      if (target === "admin") setAdminTab(tab || "applications");
       setOpenListingId(""); setLanding(false); setView(target); window.scrollTo(0, 0);
     },
   };
@@ -1612,7 +1634,7 @@ export default function SideQuest() {
   if (view === "admin") {
     return withNav(
       <>
-        <AdminView account={account} onSignIn={() => setAuthOpen(true)}
+        <AdminView key={adminTab} initialTab={adminTab} account={account} onSignIn={() => setAuthOpen(true)}
           onClose={() => { setView("market"); window.scrollTo(0, 0); }} />
         {authOpen && <AuthModal onClose={() => setAuthOpen(false)} onSubmit={doAuth} />}
       </>
@@ -1952,6 +1974,7 @@ export default function SideQuest() {
         <CardEditorModal
           card={cards.find((c) => c.uid === editingUid)}
           theme={themeObj}
+          eventType={EVENT_TYPES.find((e) => e.id === eventType)?.label || eventType}
           art={arts[editingUid]}
           photo={(participants.find((p) => p.id === (cards.find((c) => c.uid === editingUid) || {}).pid) || {}).photo || null}
           loadingArt={loadingArt[editingUid]}
@@ -2468,7 +2491,9 @@ function NotificationBell() {
   async function openOne(n) {
     setOpen(false);
     if (!n.readAt) { try { setData(await api("POST", "/api/mk/notifications/read", { ids: [n.id] })); } catch (e) { /* ignore */ } }
-    if (n.view) go(n.view, { orderId: n.orderId });
+    // Admin notifications land on the tab they're about.
+    const tab = n.kind === "admin_dispute" ? "disputes" : n.kind === "admin_style_proposal" ? "style" : n.kind === "admin_application" ? "applications" : undefined;
+    if (n.view) go(n.view, { orderId: n.orderId, tab });
   }
   async function readAll() {
     try { setData(await api("POST", "/api/mk/notifications/read", {})); } catch (e) { /* ignore */ }
@@ -2516,8 +2541,8 @@ function NotificationBell() {
 // Only reachable by accounts the server lists in ADMIN_EMAILS; the server
 // re-checks on every call, so hiding the button is cosmetic, not the guard.
 
-function AdminView({ onClose, account, onSignIn }) {
-  const [tab, setTab] = useState("applications");
+function AdminView({ onClose, account, onSignIn, initialTab = "applications" }) {
+  const [tab, setTab] = useState(initialTab);
   const tabBtn = (id, label) => (
     <button onClick={() => setTab(id)} style={{ ...navBtn, borderColor: tab === id ? "#d8b24a" : "#3a3a46", color: tab === id ? "#f3cf5b" : "#c8c8d4" }}>{label}</button>
   );
@@ -2529,8 +2554,9 @@ function AdminView({ onClose, account, onSignIn }) {
         <div style={{ display: "flex", gap: 9, marginBottom: 26, flexWrap: "wrap" }}>
           {tabBtn("applications", "Creators")}
           {tabBtn("disputes", "Disputes")}
+          {tabBtn("style", "House style")}
         </div>
-        {tab === "applications" ? <AdminCreators /> : <AdminDisputes account={account} />}
+        {tab === "applications" ? <AdminCreators /> : tab === "disputes" ? <AdminDisputes account={account} /> : <AdminStyle />}
       </>)}
     </MarketShell>
   );
@@ -2688,6 +2714,140 @@ function AdminDisputes({ account }) {
         ))}
       </>)}
     </>)}
+  </>);
+}
+
+// The learning loop's control room: review what Side Quest proposes to learn
+// from users, edit or drop rules, switch versions, and see whether each
+// version actually made people redo fewer cards.
+function AdminStyle() {
+  const [data, setData] = useState(null);
+  const [draft, setDraft] = useState(null);   // editable copy of the proposal's rules
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  function take(d) {
+    setData(d);
+    setDraft(d.proposal ? d.proposal.rules.map((r) => ({ ...r, include: true })) : null);
+  }
+  async function run(method, path, body) {
+    setBusy(true); setErr("");
+    try { take(await api(method, path, body)); } catch (e) { setErr(e.message); }
+    setBusy(false);
+  }
+  useEffect(() => { run("GET", "/api/mk/admin/style"); }, []);
+
+  const card = { background: "rgba(255,255,255,0.025)", border: "1px solid #2c2c36", borderRadius: 16, padding: 20, marginBottom: 16 };
+  const h = { fontFamily: DISPLAY_FONT, fontSize: 18, marginBottom: 6 };
+  const sub = { color: "#8a8a98", fontSize: 13, lineHeight: 1.6 };
+  const areaChip = (a) => (
+    <span style={{ fontSize: 10, letterSpacing: 1, textTransform: "uppercase", padding: "2px 7px", borderRadius: 999, marginRight: 8,
+      border: `1px solid ${a === "art" ? "#3aa0ff66" : "#d8b24a66"}`, color: a === "art" ? "#7cc0ff" : "#d8b24a" }}>{a}</span>
+  );
+  const pct = (v) => (v == null ? "—" : `${v}%`);
+
+  if (!data) return err ? <div style={{ color: "#ffc4cb" }}>⚠ {err}</div> : <div style={{ color: "#6c6c78" }}>Loading…</div>;
+  const enough = data.newSignals >= data.minSignals;
+
+  return (<>
+    {err && <div style={{ background: "rgba(239,91,107,0.12)", border: "1px solid #ef5b6b", color: "#ffc4cb", padding: "12px 16px", borderRadius: 10, marginBottom: 18, fontSize: 14 }}>⚠ {err}</div>}
+
+    {data.proposal && draft ? (
+      <div style={{ ...card, borderColor: "#d8b24a66" }}>
+        <div style={h}>Proposal — version {data.proposal.version}</div>
+        <div style={sub}>From {data.proposal.signalsUsed} user signals · {fmtRelative(data.proposal.createdAt)}</div>
+        {data.proposal.summary && <p style={{ fontSize: 14, lineHeight: 1.6, color: "#c8c8d4", margin: "12px 0 16px" }}>{data.proposal.summary}</p>}
+        {draft.map((r, i) => (
+          <div key={i} style={{ padding: "12px 0", borderTop: "1px solid #24242e", opacity: r.include ? 1 : 0.45 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, cursor: "pointer" }}>
+                <input type="checkbox" checked={r.include} onChange={(e) => setDraft((d) => d.map((x, j) => (j === i ? { ...x, include: e.target.checked } : x)))} />
+                Include
+              </label>
+              {areaChip(r.area)}
+              <span style={{ fontSize: 11, color: r.status === "new" ? "#4ade80" : r.status === "changed" ? "#f3cf5b" : "#6c6c78" }}>{r.status}</span>
+            </div>
+            <textarea value={r.text} onChange={(e) => setDraft((d) => d.map((x, j) => (j === i ? { ...x, text: e.target.value } : x)))}
+              style={{ ...inputStyle, minHeight: 54, resize: "vertical", fontSize: 14, lineHeight: 1.5 }} />
+            {r.evidence && <div style={{ ...sub, fontSize: 12, marginTop: 4 }}>Evidence: {r.evidence}</div>}
+          </div>
+        ))}
+        {data.proposal.dropped?.length > 0 && (
+          <div style={{ borderTop: "1px solid #24242e", paddingTop: 12, marginTop: 4 }}>
+            <div style={{ fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: "#8a8a98", marginBottom: 6 }}>Would drop</div>
+            {data.proposal.dropped.map((d, i) => <div key={i} style={{ ...sub, marginBottom: 4 }}><s>{d.text}</s> — {d.reason}</div>)}
+          </div>
+        )}
+        <div style={{ ...sub, margin: "14px 0 12px" }}>
+          Read every rule before activating: it goes into every card generated from now on. Remove anything that names a
+          real person, brand or franchise, or that you wouldn't want applied to everyone.
+        </div>
+        <div style={{ display: "flex", gap: 9, flexWrap: "wrap" }}>
+          <PrimaryButton disabled={busy || !draft.some((r) => r.include && r.text.trim())}
+            onClick={() => run("POST", `/api/mk/admin/style/${data.proposal.id}/activate`, { rules: draft.filter((r) => r.include) })}>
+            Activate selected rules
+          </PrimaryButton>
+          <GhostButton disabled={busy} onClick={() => run("POST", `/api/mk/admin/style/${data.proposal.id}/reject`)}>Reject proposal</GhostButton>
+        </div>
+      </div>
+    ) : (
+      <div style={card}>
+        <div style={h}>No proposal waiting</div>
+        <div style={sub}>
+          {data.newSignals} new user signal{data.newSignals === 1 ? "" : "s"} since the last proposal
+          {enough ? " — enough to learn from." : ` — a proposal needs at least ${data.minSignals}. One is drafted automatically each week once there are enough.`}
+        </div>
+        <GhostButton disabled={busy || !enough} onClick={() => run("POST", "/api/mk/admin/style/propose")} style={{ marginTop: 12 }}>
+          {busy ? "Reading signals…" : "Draft a proposal now"}
+        </GhostButton>
+      </div>
+    )}
+
+    <div style={card}>
+      <div style={h}>{data.active ? `Live guide — version ${data.active.version}` : "No guide live"}</div>
+      {data.active ? (<>
+        <div style={sub}>Activated {data.active.decidedAt ? fmtRelative(data.active.decidedAt) : "—"}</div>
+        <div style={{ marginTop: 10 }}>
+          {data.active.rules.map((r, i) => <div key={i} style={{ fontSize: 14, lineHeight: 1.6, padding: "5px 0" }}>{areaChip(r.area)}{r.text}</div>)}
+        </div>
+        <GhostButton disabled={busy} onClick={() => run("POST", "/api/mk/admin/style/deactivate")} style={{ marginTop: 12, padding: "8px 14px", fontSize: 13 }}>Turn off (back to no guide)</GhostButton>
+      </>) : <div style={sub}>Cards are generated from the base instructions only.</div>}
+    </div>
+
+    <div style={card}>
+      <div style={h}>Is it working?</div>
+      <div style={{ ...sub, marginBottom: 12 }}>How often people redo what they were given, under each version. Lower is better. Small numbers swing a lot — wait for a few hundred cards before trusting a difference.</div>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, fontVariantNumeric: "tabular-nums" }}>
+          <thead><tr style={{ color: "#8a8a98", textAlign: "right" }}>
+            <th style={{ textAlign: "left", padding: 6 }}>Version</th><th style={{ padding: 6 }}>Cards</th><th style={{ padding: 6 }}>Lore redone</th>
+            <th style={{ padding: 6 }}>Art redone</th><th style={{ padding: 6 }}>Edits / 100 cards</th><th style={{ padding: 6 }}>Checkouts</th>
+          </tr></thead>
+          <tbody>
+            {data.stats.length === 0 && <tr><td colSpan={6} style={{ padding: 6, color: "#6c6c78" }}>No data yet.</td></tr>}
+            {data.stats.map((s) => (
+              <tr key={s.version ?? 0} style={{ borderTop: "1px solid #24242e", textAlign: "right" }}>
+                <td style={{ textAlign: "left", padding: 6 }}>{s.version == null ? "No guide" : `v${s.version}`}{data.active?.version === s.version ? " (live)" : ""}</td>
+                <td style={{ padding: 6 }}>{s.cardsGenerated}</td><td style={{ padding: 6 }}>{pct(s.loreRedoPct)}</td>
+                <td style={{ padding: 6 }}>{pct(s.artRedoPct)}</td><td style={{ padding: 6 }}>{s.editsPer100Cards ?? "—"}</td><td style={{ padding: 6 }}>{s.checkouts}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    {data.history.filter((g) => g.status === "retired").length > 0 && (
+      <div style={card}>
+        <div style={h}>Earlier versions</div>
+        {data.history.filter((g) => g.status === "retired").map((g) => (
+          <div key={g.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "8px 0", borderTop: "1px solid #24242e", flexWrap: "wrap" }}>
+            <div style={sub}>v{g.version} · {g.rules.length} rule{g.rules.length === 1 ? "" : "s"}</div>
+            <GhostButton disabled={busy} onClick={() => run("POST", `/api/mk/admin/style/${g.id}/activate`)} style={{ padding: "6px 12px", fontSize: 12 }}>Restore</GhostButton>
+          </div>
+        ))}
+      </div>
+    )}
   </>);
 }
 
@@ -3535,6 +3695,10 @@ function Landing({ onOpen, onDemo, savedCount, onDecks, banner, account, onSignI
       <footer style={{ borderTop: "1px solid #1e1e28", padding: "26px 24px 40px", textAlign: "center", color: "#5a5a68", fontSize: 13 }}>
         <span style={{ fontFamily: DISPLAY_FONT, letterSpacing: 4, textTransform: "uppercase", color: "#8a7a45" }}>✦ Side Quest</span>
         <div style={{ marginTop: 8 }}>Every event deserves a deck.</div>
+        <div style={{ marginTop: 14, maxWidth: 560, marginLeft: "auto", marginRight: "auto", fontSize: 12, lineHeight: 1.6, color: "#4a4a58" }}>
+          To improve how cards are written and painted, we keep anonymised records of the cards people redo or edit —
+          text only, with names removed, never photos — for 90 days.
+        </div>
       </footer>
     </div>
   );

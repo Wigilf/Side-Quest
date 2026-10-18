@@ -107,6 +107,13 @@ and logged by the webhook; turning that into a shipped deck is the next step in
   minute. Anything that keeps the server awake (a paid instance, or an uptime
   pinger hitting `/api/health`) makes it punctual.
 
+- **House style (learning).** The server records what users redo or rewrite
+  (text only, names removed, kept 90 days). Once a week, if there are at least
+  20 new signals, Claude drafts proposed rules; you review them in Admin →
+  House style and nothing reaches generation until you activate it. The same
+  tab shows redo rates per version and lets you turn the guide off or restore
+  an older one.
+
 ---
 
 ## Security notes (important)

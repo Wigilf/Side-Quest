@@ -322,6 +322,56 @@ async function migrateMarketplace() {
   await query(`ALTER TABLE sq_decks ADD COLUMN IF NOT EXISTS art_provenance text`).catch(() => {});
 
   await migrateOperations();
+  await migrateStyleLearning();
+}
+
+// ---------------------------------------------------------------------------
+// STYLE LEARNING
+// ---------------------------------------------------------------------------
+// What users reject, redo and rewrite in generated lore and art, distilled
+// into a "house style" guide that an operator approves before it reaches any
+// prompt. Signals are text only (never photos), names are redacted before
+// storage, and rows expire after 90 days.
+async function migrateStyleLearning() {
+  await query(`
+    CREATE TABLE IF NOT EXISTS gen_signals (
+      id text PRIMARY KEY,
+      -- lore_generated / art_generated / deck_checkout: volume, for rates.
+      -- lore_regen / art_regen / card_edit: something the user didn't like.
+      kind text NOT NULL,
+      -- Which guide was in force when this happened, so each version can be
+      -- judged on its own numbers. NULL = no guide (the baseline).
+      guide_version int,
+      theme text,
+      event_type text,
+      count int NOT NULL DEFAULT 1,
+      before jsonb,
+      after jsonb,
+      note text,
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS gen_signals_time_idx ON gen_signals(created_at);
+    CREATE INDEX IF NOT EXISTS gen_signals_version_idx ON gen_signals(guide_version, kind);
+
+    -- Every version of the guide is kept, so any of them can be restored.
+    CREATE TABLE IF NOT EXISTS style_guides (
+      id text PRIMARY KEY,
+      version serial UNIQUE,
+      status text NOT NULL DEFAULT 'proposed'
+        CHECK (status IN ('proposed','active','retired','rejected')),
+      -- [{area: 'lore'|'art', text, evidence}]
+      rules jsonb NOT NULL DEFAULT '[]'::jsonb,
+      -- What the distiller dropped from the previous guide, and why.
+      dropped jsonb NOT NULL DEFAULT '[]'::jsonb,
+      summary text,
+      signals_used int NOT NULL DEFAULT 0,
+      window_end timestamptz,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      decided_at timestamptz
+    );
+    -- At most one guide is live.
+    CREATE UNIQUE INDEX IF NOT EXISTS style_guides_one_active ON style_guides(status) WHERE status = 'active';
+  `);
 }
 
 // ---------------------------------------------------------------------------
