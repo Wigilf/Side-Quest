@@ -102,6 +102,20 @@ export async function migrate() {
   await query(`ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL`).catch(() => {});
   await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS google_sub text`).catch(() => {});
   await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url text`).catch(() => {});
+  // Proof the account holder controls the address. Admin rights and outgoing
+  // email both hinge on it, so a stranger can't sign up as someone else and
+  // inherit either.
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified_at timestamptz`).catch(() => {});
+  await query(`
+    CREATE TABLE IF NOT EXISTS email_verifications (
+      -- Only the hash is stored: a leaked database row can't be replayed as a link.
+      token_hash text PRIMARY KEY,
+      user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      expires_at timestamptz NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS email_verifications_user_idx ON email_verifications(user_id);
+  `);
 
   await migrateMarketplace();
 }

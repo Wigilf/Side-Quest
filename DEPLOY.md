@@ -92,8 +92,10 @@ and logged by the webhook; turning that into a shipped deck is the next step in
 
 ## Marketplace operations
 
-- **Admin access.** Sign up on the live site with your own email, *then* set
-  `ADMIN_EMAILS` to that address on Render. An "⚙ Admin" button appears in the
+- **Admin access.** Set `ADMIN_EMAILS` to your email on Render, sign up with
+  it, and click the verification link. Without `RESEND_API_KEY` the link isn't
+  emailed — find it in Render → Logs (search `verification link`). Only a
+  verified address gets admin. An "⚙ Admin" button then appears in the
   marketplace header: approve/reject/pause creators, and settle disputes
   (pay the creator, refund the buyer, or send back for changes).
 - **Notifications** always appear in-app (the 🔔 in every header). Email copies

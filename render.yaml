@@ -26,7 +26,7 @@ services:
       - key: STRIPE_WEBHOOK_SECRET
         sync: false            # whsec_... — paste after creating the webhook
       - key: ADMIN_EMAILS
-        sync: false            # your account's email — sign up first, then set this
+        sync: false            # your account's email; admin only once it's verified
       - key: RESEND_API_KEY
         sync: false            # optional: email copies of notifications
       - key: EMAIL_FROM

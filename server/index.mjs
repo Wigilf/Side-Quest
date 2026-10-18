@@ -132,16 +132,93 @@ async function authSignup({ email, password, displayName }) {
   if ((await query("SELECT 1 FROM users WHERE email = $1", [email])).rows.length) throw httpErr(409, "email already registered");
   const id = crypto.randomUUID();
   await query("INSERT INTO users (id, email, password_hash, display_name) VALUES ($1, $2, $3, $4)", [id, email, hashPassword(password), displayName || null]);
-  return { user: { id, email, displayName: displayName || null, isAdmin: ADMIN_EMAILS.has(email) }, token: await createSession(id) };
+  await sendVerification(id, email);
+  // Never admin at signup: the address isn't proven yet.
+  return { user: { id, email, displayName: displayName || null, emailVerified: false, isAdmin: false }, token: await createSession(id) };
 }
 
 async function authLogin({ email, password }) {
   requireDb();
   email = (email || "").trim().toLowerCase();
-  const r = await query("SELECT id, email, password_hash, display_name FROM users WHERE email = $1", [email]);
+  const r = await query("SELECT id, email, password_hash, display_name, email_verified_at FROM users WHERE email = $1", [email]);
   const u = r.rows[0];
   if (!u || !verifyPassword(password, u.password_hash)) throw httpErr(401, "invalid email or password");
-  return { user: { id: u.id, email: u.email, displayName: u.display_name, isAdmin: ADMIN_EMAILS.has(u.email) }, token: await createSession(u.id) };
+  return { user: publicUser(u), token: await createSession(u.id) };
+}
+
+// ---- Email verification ----------------------------------------------------
+// A signup proves nothing about the address typed into it. Anything that
+// trusts the address — admin rights (ADMIN_EMAILS), outgoing email — waits
+// until the owner clicks a link sent there.
+//
+// Without an email provider configured the link is written to the server log
+// instead. Only whoever can read the host's logs sees it, which is the same
+// person who controls ADMIN_EMAILS, so that is a safe fallback, not a bypass.
+
+const VERIFY_TTL_HOURS = 24;
+const sha256 = (s) => crypto.createHash("sha256").update(s).digest("hex");
+
+function publicUser(u) {
+  const verified = !!u.email_verified_at;
+  return {
+    id: u.id, email: u.email, displayName: u.display_name, emailVerified: verified,
+    isAdmin: verified && ADMIN_EMAILS.has(String(u.email).toLowerCase()),
+  };
+}
+
+async function sendVerification(userId, email) {
+  const token = crypto.randomBytes(32).toString("hex");
+  // One live link at a time: asking again retires the old one.
+  await query("DELETE FROM email_verifications WHERE user_id = $1", [userId]);
+  await query(
+    `INSERT INTO email_verifications (token_hash, user_id, expires_at)
+     VALUES ($1, $2, now() + $3 * interval '1 hour')`, [sha256(token), userId, VERIFY_TTL_HOURS]);
+  const link = `${SITE_URL}?verify=${token}`;
+  const sent = await sendEmail(email, "Confirm your Side Quest email",
+    `Confirm this is your email address by opening the link below:\n\n${link}\n\n` +
+    `It expires in ${VERIFY_TTL_HOURS} hours. If you didn't sign up for Side Quest, ignore this email.\n`)
+    .catch((e) => { console.error("verification email failed:", e.message); return false; });
+  if (!sent) console.log(`[verify] email not sent — verification link for ${email}: ${link}`);
+}
+
+async function verifyEmail(body) {
+  requireDb();
+  const token = String(body?.token || "");
+  if (!/^[0-9a-f]{64}$/.test(token)) throw httpErr(400, "this verification link is invalid");
+  // Single use: the row is consumed by the same statement that checks it.
+  const r = await query(
+    `DELETE FROM email_verifications WHERE token_hash = $1 RETURNING user_id, expires_at`, [sha256(token)]);
+  const row = r.rows[0];
+  if (!row) throw httpErr(400, "this verification link is invalid or has already been used");
+  if (new Date(row.expires_at).getTime() < Date.now()) throw httpErr(410, "this verification link has expired — request a new one");
+  await query("UPDATE users SET email_verified_at = COALESCE(email_verified_at, now()) WHERE id = $1", [row.user_id]);
+  return { ok: true };
+}
+
+async function resendVerification(ctx) {
+  requireDb(); requireUser(ctx);
+  const u = (await query("SELECT email, email_verified_at FROM users WHERE id = $1", [ctx.userId])).rows[0];
+  if (!u) throw httpErr(401, "sign in required");
+  if (u.email_verified_at) return { ok: true, alreadyVerified: true };
+  // Throttle per account on top of the per-IP limit, so this can't be used to
+  // flood someone's inbox.
+  const recent = (await query(
+    `SELECT 1 FROM email_verifications WHERE user_id = $1 AND created_at > now() - interval '60 seconds'`, [ctx.userId])).rows[0];
+  if (recent) throw httpErr(429, "a link was just sent — wait a minute before asking again");
+  await sendVerification(ctx.userId, u.email);
+  return { ok: true };
+}
+
+// Returns true if handed to the provider, false if email isn't configured.
+async function sendEmail(to, subject, text) {
+  if (!RESEND_API_KEY || !EMAIL_FROM) return false;
+  const res = await fetchWithTimeout("https://api.resend.com/emails", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${RESEND_API_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ from: EMAIL_FROM, to: [to], subject, text }),
+  });
+  if (!res.ok) throw new Error(`Resend ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  return true;
 }
 
 // ---- Marketplace: creators + listings -------------------------------------
@@ -972,15 +1049,12 @@ async function notify(userId, { kind, title, body = null, view = null, orderId =
 
 async function emailNotification(notificationId, userId, title, body) {
   if (!RESEND_API_KEY || !EMAIL_FROM) return;
-  const u = (await query("SELECT email FROM users WHERE id = $1", [userId])).rows[0];
+  // Unverified addresses get nothing: otherwise anyone could sign up with a
+  // stranger's email and have us send them mail.
+  const u = (await query("SELECT email FROM users WHERE id = $1 AND email_verified_at IS NOT NULL", [userId])).rows[0];
   if (!u?.email) return;
   const text = `${body ? body + "\n\n" : ""}Open Side Quest: ${SITE_URL}\n`;
-  const res = await fetchWithTimeout("https://api.resend.com/emails", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${RESEND_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ from: EMAIL_FROM, to: [u.email], subject: title, text }),
-  });
-  if (!res.ok) throw new Error(`Resend ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  if (!(await sendEmail(u.email, title, text))) return;
   await query("UPDATE mk_notifications SET emailed_at = now() WHERE id = $1", [notificationId]);
 }
 
@@ -1009,8 +1083,8 @@ async function notificationsRead(body, ctx) {
 // anywhere in the product, so the only way to become one is to control the
 // server's environment.
 //
-// Signup doesn't verify email ownership, so an address listed here must
-// already have an account: otherwise whoever registers it first gets admin.
+// An address only counts once its owner has verified it, so listing an email
+// nobody has claimed yet doesn't hand admin to whoever registers it first.
 
 const ADMIN_EMAILS = new Set((process.env.ADMIN_EMAILS || "")
   .split(",").map((s) => s.trim().toLowerCase()).filter(Boolean));
@@ -1018,7 +1092,7 @@ const ADMIN_EMAILS = new Set((process.env.ADMIN_EMAILS || "")
 async function isAdmin(ctx) {
   if (!ctx.userId || ADMIN_EMAILS.size === 0) return false;
   if (ctx.isAdmin !== undefined) return ctx.isAdmin;
-  const r = await query("SELECT email FROM users WHERE id = $1", [ctx.userId]);
+  const r = await query("SELECT email FROM users WHERE id = $1 AND email_verified_at IS NOT NULL", [ctx.userId]);
   ctx.isAdmin = ADMIN_EMAILS.has(String(r.rows[0]?.email || "").toLowerCase());
   return ctx.isAdmin;
 }
@@ -1031,7 +1105,8 @@ async function requireAdmin(ctx) {
 
 async function adminUserIds() {
   if (ADMIN_EMAILS.size === 0) return [];
-  const r = await query("SELECT id FROM users WHERE lower(email) = ANY($1::text[])", [[...ADMIN_EMAILS]]);
+  const r = await query(
+    "SELECT id FROM users WHERE lower(email) = ANY($1::text[]) AND email_verified_at IS NOT NULL", [[...ADMIN_EMAILS]]);
   return r.rows.map((x) => x.id);
 }
 
@@ -1967,11 +2042,13 @@ const routes = {
   "POST /api/auth/signup": async (b) => authSignup(b),
   "POST /api/auth/login": async (b) => authLogin(b),
   "POST /api/auth/logout": async (b, ctx) => { if (ctx.token) await query("DELETE FROM sessions WHERE token = $1", [ctx.token]); return { ok: true }; },
+  "POST /api/auth/verify": async (b) => verifyEmail(b),
+  "POST /api/auth/resend-verification": async (b, ctx) => resendVerification(ctx),
   "GET /api/auth/me": async (b, ctx) => {
     requireUser(ctx);
-    const r = await query("SELECT id, email, display_name FROM users WHERE id = $1", [ctx.userId]);
+    const r = await query("SELECT id, email, display_name, email_verified_at FROM users WHERE id = $1", [ctx.userId]);
     if (!r.rows.length) throw httpErr(401, "sign in required");
-    return { user: { id: r.rows[0].id, email: r.rows[0].email, displayName: r.rows[0].display_name, isAdmin: ADMIN_EMAILS.has(String(r.rows[0].email).toLowerCase()) } };
+    return { user: publicUser(r.rows[0]) };
   },
   "GET /api/decks": async (b, ctx) => decksList(ctx),
   "POST /api/decks": async (b, ctx) => deckSave(ctx, b),
@@ -2025,7 +2102,8 @@ const server = http.createServer(async (req, res) => {
   // Marketplace writes are cheap but spammable — listings and profiles are
   // public surface, so they get the same per-IP ceiling as deck writes.
   const mkWrite = p.startsWith("/api/mk/") && req.method !== "GET";
-  const rateLimitedPath = PAID.has(p) || sqWrite || mkWrite || p === "/api/checkout" || p === "/api/auth/login" || p === "/api/auth/signup";
+  const rateLimitedPath = PAID.has(p) || sqWrite || mkWrite || p === "/api/checkout" || p === "/api/auth/login" || p === "/api/auth/signup"
+    || p === "/api/auth/verify" || p === "/api/auth/resend-verification";
   if (rateLimitedPath) {
     if (PAID.has(p) && API_TOKEN) {
       const auth = req.headers.authorization || "";

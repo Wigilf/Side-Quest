@@ -1164,6 +1164,23 @@ export default function SideQuest() {
     refreshDecks();
   }
 
+  // Arriving from a verification email (?verify=<token>). The link may be opened
+  // on a device that isn't signed in, so the token alone does the work; if this
+  // browser is signed in, refresh the account so admin/verified state updates.
+  const [verifyResult, setVerifyResult] = useState(null);   // null | "ok" | error message
+  useEffect(() => {
+    const token = new URLSearchParams(window.location.search).get("verify");
+    if (!token || !API_BASE) return;
+    window.history.replaceState({}, "", window.location.pathname);
+    (async () => {
+      try {
+        await api("POST", "/api/auth/verify", { token });
+        setVerifyResult("ok");
+        if (getSessionToken()) { try { setAccount((await api("GET", "/api/auth/me")).user); } catch (e) { /* ignore */ } }
+      } catch (e) { setVerifyResult(e.message); }
+    })();
+  }, []);
+
   // Detect a return from Stripe Checkout (?checkout=success|cancel) and clean the URL.
   useEffect(() => {
     const p = new URLSearchParams(window.location.search).get("checkout");
@@ -1585,7 +1602,12 @@ export default function SideQuest() {
       setOpenListingId(""); setLanding(false); setView(target); window.scrollTo(0, 0);
     },
   };
-  const withNav = (el) => <NavContext.Provider value={nav}>{el}</NavContext.Provider>;
+  const withNav = (el) => (
+    <NavContext.Provider value={nav}>
+      {el}
+      <VerifyBar account={account} result={verifyResult} onDismiss={() => setVerifyResult(null)} />
+    </NavContext.Provider>
+  );
 
   if (view === "admin") {
     return withNav(
@@ -2379,6 +2401,39 @@ function ItemDeadline({ item, isCreator }) {
           <span style={{ color: "#d8b24a" }}>{resolution}.</span>{item.resolutionNote ? ` “${item.resolutionNote}”` : ""}
         </div>
       )}
+    </div>
+  );
+}
+
+// Bottom bar: the outcome of opening a verification link, or a nudge (with a
+// resend button) for a signed-in account that hasn't verified yet.
+function VerifyBar({ account, result, onDismiss }) {
+  const [sent, setSent] = useState("");
+  const [busy, setBusy] = useState(false);
+  let tone = "info", msg = null, action = null;
+  if (result === "ok") { tone = "good"; msg = "Email confirmed — thanks."; }
+  else if (result) { tone = "bad"; msg = `Couldn't confirm your email: ${result}`; }
+  else if (account && !account.emailVerified) {
+    msg = sent || `Confirm your email — we sent a link to ${account.email}.`;
+    action = !sent && (
+      <button disabled={busy} onClick={async () => {
+        setBusy(true);
+        try { await api("POST", "/api/auth/resend-verification"); setSent("New link sent — check your inbox."); }
+        catch (e) { setSent(e.message); }
+        setBusy(false);
+      }} style={{ ...navBtn, padding: "6px 12px", fontSize: 12 }}>Resend link</button>
+    );
+  }
+  if (!msg) return null;
+  const c = { good: "#4ade80", bad: "#ef5b6b", info: "#d8b24a" }[tone];
+  return (
+    <div role="status" style={{ position: "fixed", left: 16, right: 16, bottom: 16, zIndex: 60, maxWidth: 640, margin: "0 auto",
+      display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", padding: "12px 16px", borderRadius: 12,
+      background: "#15121d", border: `1px solid ${c}66`, boxShadow: "0 12px 40px rgba(0,0,0,0.5)",
+      color: "#e8e8f0", fontFamily: UI_FONT, fontSize: 14 }}>
+      <span style={{ flex: 1, minWidth: 200 }}><span style={{ color: c }}>●</span> {msg}</span>
+      {action}
+      {result && <button onClick={onDismiss} aria-label="Dismiss" style={{ background: "none", border: "none", color: "#8a8a98", cursor: "pointer", fontSize: 18 }}>×</button>}
     </div>
   );
 }
