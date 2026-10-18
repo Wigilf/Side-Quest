@@ -1522,7 +1522,7 @@ ${liked.map((c) => `[${c.occasion || "any"}] ` + CARD_TEXT_FIELDS.filter((k) => 
 
 Return ONLY JSON: {"summary":"2-3 sentences on what users are telling us","rules":[{"area":"lore|art","occasion":"optional event type","text":"...","evidence":"...","status":"kept|new|changed"}],"dropped":[{"text":"...","reason":"..."}]}`;
 
-  const out = await callClaude(prompt, { json: true, maxTokens: 2500 });
+  const out = await callClaude(prompt, { json: true, maxTokens: 4000, schema: SCHEMAS.styleProposal });
   const rules = (Array.isArray(out?.rules) ? out.rules : [])
     .filter((r) => (r?.area === "lore" || r?.area === "art") && String(r?.text || "").trim())
     .slice(0, STYLE_MAX_RULES)
@@ -1977,7 +1977,55 @@ async function sqCollabRemoveCard({ token, uid }) {
 
 // ---- Anthropic (lore) -----------------------------------------------------
 
-async function callClaude(prompt, { json = false, maxTokens = 1200 } = {}) {
+// JSON shapes Claude must answer in. With output_config.format the API
+// guarantees the reply matches, so a stray quote in a flavor line can no
+// longer break the whole deck. (Numeric ranges like cost 1-7 aren't
+// expressible here — they stay in the prompt.)
+const FRAMES = ["gold", "azure", "crimson", "verdant", "violet"];
+const obj = (properties, required = Object.keys(properties)) =>
+  ({ type: "object", properties, required, additionalProperties: false });
+const str = { type: "string" }, int = { type: "integer" };
+const CARD_FIELDS = { title: str, typeLine: str, cost: int, power: int, toughness: int, ability: str, flavor: str, frame: { type: "string", enum: FRAMES } };
+const SCHEMAS = {
+  card: obj({ realName: str, ...CARD_FIELDS }),
+  deck: obj({
+    questCard: obj({ title: str, typeLine: str, ability: str, flavor: str }),
+    cards: { type: "array", items: obj({ realName: str, ...CARD_FIELDS }) },
+  }),
+  suggestions: obj({ cards: { type: "array", items: obj(CARD_FIELDS) } }),
+  styleProposal: obj({
+    summary: str,
+    rules: { type: "array", items: obj(
+      { area: { type: "string", enum: ["lore", "art"] }, occasion: str, text: str, evidence: str,
+        status: { type: "string", enum: ["kept", "new", "changed"] } },
+      ["area", "text", "evidence", "status"]) },
+    dropped: { type: "array", items: obj({ text: str, reason: str }) },
+  }),
+};
+
+// Without a schema, a model reply can still carry a stray code fence or a
+// sentence around the JSON; strip what we can before giving up.
+function parseModelJson(text) {
+  const clean = text.replace(/```json/gi, "").replace(/```/g, "").trim();
+  try { return JSON.parse(clean); } catch { /* fall through */ }
+  const a = clean.indexOf("{"), b = clean.lastIndexOf("}");
+  if (a >= 0 && b > a) return JSON.parse(clean.slice(a, b + 1));
+  throw new Error("reply was not JSON");
+}
+
+// One retry on an unreadable or truncated reply: these are one-off slips,
+// and a second attempt almost always comes back clean — far better than
+// dropping the user to the generic fallback deck.
+async function callClaude(prompt, opts = {}) {
+  try { return await callClaudeOnce(prompt, opts); }
+  catch (e) {
+    if (!e.retryable) throw e;
+    console.warn("lore reply unusable, retrying once:", e.message);
+    return callClaudeOnce(prompt, opts);
+  }
+}
+
+async function callClaudeOnce(prompt, { json = false, maxTokens = 1200, schema = null } = {}) {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) throw new Error("Lore service is not configured");
   const sys = json
@@ -1994,6 +2042,7 @@ async function callClaude(prompt, { json = false, maxTokens = 1200 } = {}) {
       model: ANTHROPIC_MODEL,
       max_tokens: maxTokens,
       thinking: { type: "disabled" }, // keep latency low for user-facing lore gen
+      ...(schema ? { output_config: { format: { type: "json_schema", schema } } } : {}),
       messages: [{ role: "user", content: (sys ? sys + "\n\n" : "") + prompt }],
     }),
   });
@@ -2003,10 +2052,16 @@ async function callClaude(prompt, { json = false, maxTokens = 1200 } = {}) {
     throw new Error(`Lore service error (${res.status})`);
   }
   const data = await res.json();
+  if (data.stop_reason === "refusal") throw new Error("Lore service declined this request");
   const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
   if (!json) return text.trim();
-  const clean = text.replace(/```json/gi, "").replace(/```/g, "").trim();
-  return JSON.parse(clean);
+  // Cut off mid-answer: the JSON is incomplete, but a retry (or a bigger
+  // budget) usually fixes it.
+  if (data.stop_reason === "max_tokens") {
+    const e = new Error(`lore reply was cut off at ${maxTokens} tokens`); e.retryable = true; throw e;
+  }
+  try { return parseModelJson(text); }
+  catch (err) { const e = new Error(`lore reply was not valid JSON (${err.message})`); e.retryable = true; throw e; }
 }
 
 // ---- Gemini "nano-banana" (face -> character art) -------------------------
@@ -2544,19 +2599,19 @@ const routes = {
   "GET /api/decks": async (b, ctx) => decksList(ctx),
   "POST /api/decks": async (b, ctx) => deckSave(ctx, b),
   "POST /api/generate-lore": async (b) => {
-    const lore = await callClaude(loreDeckPrompt(b) + await houseStyle("lore", b.eventType), { json: true, maxTokens: 2500 });
+    const lore = await callClaude(loreDeckPrompt(b) + await houseStyle("lore", b.eventType), { json: true, maxTokens: 8000, schema: SCHEMAS.deck });
     if (!lore || !Array.isArray(lore.cards) || lore.cards.length === 0) throw new Error("empty lore");
     recordSignal({ kind: "lore_generated", theme: b.theme, eventType: b.eventType, count: lore.cards.length + 1 });
     return lore;
   },
   "POST /api/regenerate-lore": async (b) => {
-    const out = await callClaude(loreOnePrompt(b) + await houseStyle("lore", b.eventType), { json: true, maxTokens: 700 });
+    const out = await callClaude(loreOnePrompt(b) + await houseStyle("lore", b.eventType), { json: true, maxTokens: 1500, schema: SCHEMAS.card });
     // Asking for a new take is a vote against the old one — keep what was rejected.
     recordSignal({ kind: "lore_regen", theme: b.theme, eventType: b.eventType, before: cardText(b.card, [b.card?.realName]) });
     return out;
   },
   "POST /api/suggest-cards": async (b) => {
-    const out = await callClaude(suggestCardsPrompt(b) + await houseStyle("lore", b.eventType), { json: true, maxTokens: 1400 });
+    const out = await callClaude(suggestCardsPrompt(b) + await houseStyle("lore", b.eventType), { json: true, maxTokens: 3000, schema: SCHEMAS.suggestions });
     if (!out || !Array.isArray(out.cards) || out.cards.length === 0) throw new Error("empty suggestions");
     recordSignal({ kind: "lore_generated", theme: b.theme, eventType: b.eventType, count: out.cards.length });
     return out;

@@ -374,6 +374,33 @@ async function api(method, pathname, body) {
   return res.json();
 }
 
+// Phone photos are 3-12 MB. Kept whole, they ride along in every art request
+// and in the saved deck (four people's photos alone pass the 25 MB save
+// limit). A card portrait needs nothing near that: ~1000px is plenty for the
+// face model and for print, and the result is ~30x smaller.
+const PHOTO_MAX_EDGE = 1024;
+const CARD_BACK_MAX_EDGE = 1600;
+
+async function shrinkImage(file, maxEdge, quality = 0.85) {
+  const readAsIs = () => new Promise((res, rej) => {
+    const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(file);
+  });
+  try {
+    // from-image applies the phone's rotation flag, so portraits aren't sideways.
+    const bmp = await createImageBitmap(file, { imageOrientation: "from-image" });
+    const scale = Math.min(1, maxEdge / Math.max(bmp.width, bmp.height));
+    const c = document.createElement("canvas");
+    c.width = Math.round(bmp.width * scale); c.height = Math.round(bmp.height * scale);
+    c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+    bmp.close?.();
+    return c.toDataURL("image/jpeg", quality);
+  } catch (e) {
+    // A format this browser can't decode (e.g. HEIC outside Safari): keep the
+    // original rather than lose the photo.
+    return readAsIs();
+  }
+}
+
 // Run `fn` over `items` with at most `limit` in flight at once, keeping order.
 async function mapLimit(items, limit, fn) {
   const out = new Array(items.length);
@@ -1560,8 +1587,8 @@ export default function SideQuest() {
   }
   function updateParticipant(id, patch) { setParticipants((p) => p.map((x) => (x.id === id ? { ...x, ...patch } : x))); }
   function removeParticipant(id) { setParticipants((p) => p.filter((x) => x.id !== id)); }
-  function onPhoto(id, file) { const rd = new FileReader(); rd.onload = () => updateParticipant(id, { photo: rd.result }); rd.readAsDataURL(file); }
-  function onCardBackImage(file) { const rd = new FileReader(); rd.onload = () => setCardBack({ type: "image", image: rd.result }); rd.readAsDataURL(file); }
+  async function onPhoto(id, file) { updateParticipant(id, { photo: await shrinkImage(file, PHOTO_MAX_EDGE) }); }
+  async function onCardBackImage(file) { setCardBack({ type: "image", image: await shrinkImage(file, CARD_BACK_MAX_EDGE) }); }
 
   function loadDemo() {
     setUser(DEMO.user); setEventType(DEMO.eventType); setTheme(DEMO.theme);
