@@ -2210,14 +2210,20 @@ function DecksModal({ decks, onClose, onOpen, onDelete, onNew }) {
               const th = THEMES.find((t) => t.id === d.theme) || THEMES[1];
               const ev = EVENT_TYPES.find((e) => e.id === d.eventType);
               return (
-                <div key={d.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: 12, borderRadius: 12, border: "1px solid #2c2c36", background: "rgba(255,255,255,0.02)" }}>
+                // The whole row opens the deck, not only the small Open button —
+                // people click the deck's name and expect it to open.
+                <div key={d.id} role="button" tabIndex={0} title="Open this deck"
+                  onClick={() => onOpen(d.id)}
+                  onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(d.id); } }}
+                  style={{ display: "flex", alignItems: "center", gap: 12, padding: 12, borderRadius: 12, border: "1px solid #2c2c36", background: "rgba(255,255,255,0.02)", cursor: "pointer" }}>
                   <div style={{ width: 40, height: 54, borderRadius: 6, flexShrink: 0, background: `linear-gradient(160deg, ${th.accent}44, ${th.bg[0]})`, border: `1px solid ${th.accent}`, display: "flex", alignItems: "center", justifyContent: "center", color: th.accent }}>{th.ornament}</div>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontFamily: UI_FONT, fontSize: 15, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{d.name}</div>
                     <div style={{ fontSize: 12, color: "#8a8a98" }}>{ev?.label || d.eventType} · {th.label} · {d.count} cards</div>
                   </div>
-                  <button onClick={() => onOpen(d.id)} style={{ ...navBtn, borderColor: "#d8b24a", color: "#f3cf5b" }}>Open</button>
-                  <button onClick={() => onDelete(d.id)} style={{ background: "none", border: "none", color: "#777", cursor: "pointer", fontSize: 16 }}>🗑</button>
+                  <button onClick={(e) => { e.stopPropagation(); onOpen(d.id); }} style={{ ...navBtn, borderColor: "#d8b24a", color: "#f3cf5b" }}>Open</button>
+                  {/* Must not bubble to the row, or deleting would also try to open the deck. */}
+                  <button onClick={(e) => { e.stopPropagation(); onDelete(d.id); }} aria-label="Delete deck" style={{ background: "none", border: "none", color: "#777", cursor: "pointer", fontSize: 16 }}>🗑</button>
                 </div>
               );
             })}
