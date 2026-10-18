@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, createContext, useContext } from "react";
 
 /*
   ============================================================================
@@ -1575,11 +1575,33 @@ export default function SideQuest() {
        (!participants.some((p) => p.photo) || photoConsent),
   };
 
+  // Where a notification (or the admin button) takes you. Every page reads
+  // this from context, so the bell works the same in any header.
+  const [focusOrderId, setFocusOrderId] = useState("");
+  const nav = {
+    account,
+    go: (target, { orderId } = {}) => {
+      setFocusOrderId(target === "orders" && orderId ? orderId : "");
+      setOpenListingId(""); setLanding(false); setView(target); window.scrollTo(0, 0);
+    },
+  };
+  const withNav = (el) => <NavContext.Provider value={nav}>{el}</NavContext.Provider>;
+
+  if (view === "admin") {
+    return withNav(
+      <>
+        <AdminView account={account} onSignIn={() => setAuthOpen(true)}
+          onClose={() => { setView("market"); window.scrollTo(0, 0); }} />
+        {authOpen && <AuthModal onClose={() => setAuthOpen(false)} onSubmit={doAuth} />}
+      </>
+    );
+  }
+
   // ===== MARKETPLACE / CREATOR STUDIO =====
   // Full-screen views rather than modals: both are destinations you browse,
   // and the builder's state stays untouched underneath.
   if (view === "listing" && openListingId) {
-    return (
+    return withNav(
       <>
         <ListingDetail
           id={openListingId}
@@ -1600,16 +1622,16 @@ export default function SideQuest() {
     );
   }
   if (view === "orders") {
-    return (
+    return withNav(
       <>
-        <OrdersView account={account} onSignIn={() => setAuthOpen(true)}
+        <OrdersView account={account} onSignIn={() => setAuthOpen(true)} initialOrderId={focusOrderId}
           onClose={() => { setView("market"); window.scrollTo(0, 0); }} />
         {authOpen && <AuthModal onClose={() => setAuthOpen(false)} onSubmit={doAuth} />}
       </>
     );
   }
   if (view === "work") {
-    return (
+    return withNav(
       <>
         <WorkView account={account} onSignIn={() => setAuthOpen(true)}
           onClose={() => { setView("studio"); window.scrollTo(0, 0); }} />
@@ -1618,7 +1640,7 @@ export default function SideQuest() {
     );
   }
   if (view === "market") {
-    return (
+    return withNav(
       <>
         <Marketplace
           account={account}
@@ -1632,7 +1654,7 @@ export default function SideQuest() {
     );
   }
   if (view === "studio") {
-    return (
+    return withNav(
       <>
         <CreatorStudio
           account={account}
@@ -1647,7 +1669,7 @@ export default function SideQuest() {
 
   // ===== LANDING =====
   if (landing) {
-    return (
+    return withNav(
       <>
         <Landing
           // The landing scrolls, the app does not reset it — without this you
@@ -1668,7 +1690,7 @@ export default function SideQuest() {
   }
 
   // ===== APP =====
-  return (
+  return withNav(
     <div style={{ minHeight: "100vh", background: `radial-gradient(1200px 600px at 50% -10%, ${themeObj.bg[1]} 0%, #14121c 50%, #0a090f 100%)`, color: "#e8e8f0", fontFamily: UI_FONT, padding: "0 0 80px", transition: "background .6s" }}>
       <GlobalCSS />
       {checkoutReturn && <CheckoutBanner status={checkoutReturn} onClose={() => setCheckoutReturn(null)} />}
@@ -1679,6 +1701,7 @@ export default function SideQuest() {
           <button onClick={newDeck} style={navBtn}>＋ New</button>
           <button onClick={() => setShowDecks(true)} style={navBtn}>◈ My decks{savedDecks.length ? ` (${savedDecks.length})` : ""}</button>
           <button onClick={() => { setView("market"); window.scrollTo(0, 0); }} style={navBtn}>✦ Marketplace</button>
+          <NotificationBell />
           <AccountButton account={account} onSignIn={() => setAuthOpen(true)} onSignOut={signOut} />
         </div>
       </div>
@@ -2057,10 +2080,33 @@ const ITEM_STATUS_LABEL = {
   declined: "Declined",
   cancelled: "Cancelled",
   disputed: "Disputed — with support",
+  refunded: "Refunded",
 };
 const ITEM_STATUS_COLOR = {
   delivered: "#f3cf5b", accepted: "#4ade80", disputed: "#ef5b6b",
-  declined: "#ef5b6b", cancelled: "#6c6c78",
+  declined: "#ef5b6b", cancelled: "#6c6c78", refunded: "#6c6c78",
+};
+
+// "Tue 21 Oct, 14:00" — deadlines are days apart, so the weekday matters more
+// than the year.
+function fmtWhen(ms) {
+  return new Date(ms).toLocaleString(undefined, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+}
+// "in 3 days" / "2 hours ago", for deadlines.
+function fmtRelative(ms) {
+  const diff = ms - Date.now();
+  const abs = Math.abs(diff);
+  const [n, unit] = abs >= 86400e3 ? [Math.round(abs / 86400e3), "day"] : abs >= 3600e3 ? [Math.round(abs / 3600e3), "hour"] : [Math.max(1, Math.round(abs / 60e3)), "minute"];
+  const s = `${n} ${unit}${n === 1 ? "" : "s"}`;
+  return diff >= 0 ? `in ${s}` : `${s} ago`;
+}
+
+const RESOLUTION_LABEL = {
+  released: "Support released payment to the creator",
+  refunded: "Support refunded the buyer",
+  rework: "Support sent this back to the creator for changes",
+  auto_declined: "Declined automatically — the creator didn't respond in time",
+  auto_accepted: "Accepted automatically — the buyer didn't respond in time",
 };
 
 function StatusPill({ status }) {
@@ -2089,7 +2135,9 @@ async function uploadAttachment(itemId, file) {
   return { url: pre.publicUrl, name: file.name, contentType: pre.contentType };
 }
 
-function ChatThread({ itemId, account }) {
+// `readOnly` is the operator's view of a disputed thread: they can read it but
+// are not a party to it, and the server refuses their posts anyway.
+function ChatThread({ itemId, account, readOnly }) {
   const [messages, setMessages] = useState([]);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -2138,7 +2186,7 @@ function ChatThread({ itemId, account }) {
       <div style={{ maxHeight: 300, overflowY: "auto", padding: 14, display: "flex", flexDirection: "column", gap: 10 }}>
         {messages.length === 0 && <div style={{ color: "#6c6c78", fontSize: 13 }}>No messages yet — say hello.</div>}
         {messages.map((m) => {
-          const mine = m.senderId === account?.id;
+          const mine = !readOnly && m.senderId === account?.id;
           return (
             <div key={m.id} style={{ alignSelf: mine ? "flex-end" : "flex-start", maxWidth: "82%" }}>
               <div style={{ fontSize: 11, color: "#6c6c78", marginBottom: 3, textAlign: mine ? "right" : "left" }}>
@@ -2160,14 +2208,14 @@ function ChatThread({ itemId, account }) {
         <div ref={endRef} />
       </div>
       {err && <div style={{ color: "#ffc4cb", fontSize: 13, padding: "0 14px 8px" }}>⚠ {err}</div>}
-      <div style={{ display: "flex", gap: 8, padding: 12, borderTop: "1px solid #24242e" }}>
+      {!readOnly && <div style={{ display: "flex", gap: 8, padding: 12, borderTop: "1px solid #24242e" }}>
         <input value={text} onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
           placeholder="Write a message…" style={{ ...inputStyle, marginBottom: 0, flex: 1 }} />
         <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={onPickFile} style={{ display: "none" }} />
         <GhostButton onClick={() => fileRef.current?.click()} disabled={busy} style={{ padding: "11px 14px" }}>📎</GhostButton>
         <PrimaryButton onClick={() => send()} disabled={busy || !text.trim()}>Send</PrimaryButton>
-      </div>
+      </div>}
     </div>
   );
 }
@@ -2221,12 +2269,14 @@ function ItemPanel({ item, role, account, onChanged }) {
           <div style={{ fontFamily: DISPLAY_FONT, fontSize: 19 }}>{item.title}</div>
           <div style={{ color: "#8a8a98", fontSize: 13, marginTop: 3 }}>
             {item.discipline === "artist" ? "Illustration" : "Adventure lore"} · {money(item.priceCents)}
-            {isCreator && ` · you earn ${money(item.creatorEarningsCents)}`}
+            {isCreator && !["refunded", "cancelled", "declined"].includes(item.status) && ` · you earn ${money(item.creatorEarningsCents)}`}
             {item.creator && !isCreator && ` · ${item.creator.displayName}`}
           </div>
         </div>
         <StatusPill status={item.status} />
       </div>
+
+      <ItemDeadline item={item} isCreator={isCreator} />
 
       {item.brief && (
         <div style={{ marginTop: 14, padding: 12, borderRadius: 10, background: "rgba(0,0,0,0.25)", border: "1px solid #24242e" }}>
@@ -2250,10 +2300,13 @@ function ItemPanel({ item, role, account, onChanged }) {
           <GhostButton onClick={() => act("request_revision", { note })} disabled={busy || revisionsLeft <= 0}>
             Request revision{revisionsLeft > 0 ? ` (${revisionsLeft} left)` : " — none left"}
           </GhostButton>
-          <GhostButton onClick={() => act("dispute", { reason: note })} disabled={busy}>Raise a problem</GhostButton>
+          <GhostButton onClick={() => act("dispute", { reason: note })} disabled={busy || !note.trim()}>Raise a problem</GhostButton>
         </>)}
-        {!isCreator && ["pending", "accepted_by_creator"].includes(item.status) && (
+        {!isCreator && ["pending", "accepted_by_creator"].includes(item.status) && !item.overdue && (
           <GhostButton onClick={() => act("cancel")} disabled={busy}>Cancel</GhostButton>
+        )}
+        {!isCreator && item.overdue && (
+          <GhostButton onClick={() => act("cancel_late")} disabled={busy}>Cancel — deadline missed</GhostButton>
         )}
       </div>
 
@@ -2278,7 +2331,7 @@ function ItemPanel({ item, role, account, onChanged }) {
 
       {!isCreator && item.status === "delivered" && (
         <input value={note} onChange={(e) => setNote(e.target.value)}
-          placeholder="What needs changing? (used for a revision or a problem report)"
+          placeholder="What needs changing? (required to raise a problem)"
           style={{ ...inputStyle, marginTop: 12 }} />
       )}
 
@@ -2287,6 +2340,328 @@ function ItemPanel({ item, role, account, onChanged }) {
       <div style={{ marginTop: 16 }}>
         <ChatThread itemId={item.id} account={account} />
       </div>
+    </div>
+  );
+}
+
+// The one line of "what happens next, and by when" under an item. The dates
+// come from the server, which is what actually enforces them.
+function ItemDeadline({ item, isCreator }) {
+  let text = null, warn = false;
+  if (item.status === "pending" && item.respondBy) {
+    text = isCreator
+      ? `Accept or decline by ${fmtWhen(item.respondBy)} (${fmtRelative(item.respondBy)}) — otherwise it's declined automatically.`
+      : `Waiting for the creator to accept — they have until ${fmtWhen(item.respondBy)}.`;
+  } else if (item.overdue) {
+    warn = true;
+    text = isCreator
+      ? `Overdue — was due ${fmtRelative(item.dueAt)}. The buyer can now cancel.`
+      : `Past its deadline (due ${fmtRelative(item.dueAt)}). You can keep waiting or cancel without penalty.`;
+  } else if (["accepted_by_creator", "in_progress", "revision_requested"].includes(item.status) && item.dueAt) {
+    text = `Due ${fmtWhen(item.dueAt)} (${fmtRelative(item.dueAt)}).`;
+  } else if (item.status === "delivered" && item.autoAcceptAt) {
+    text = isCreator
+      ? `Waiting on the buyer. If they don't respond, it's accepted automatically on ${fmtWhen(item.autoAcceptAt)}.`
+      : `Review by ${fmtWhen(item.autoAcceptAt)} — after that it's accepted automatically.`;
+  }
+  const resolution = item.resolution && RESOLUTION_LABEL[item.resolution];
+  if (!text && !resolution && !item.disputeReason) return null;
+  return (
+    <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 6, fontSize: 13, lineHeight: 1.55 }}>
+      {text && <div style={{ color: warn ? "#ffb4bd" : "#a8a8b8" }}>{warn ? "⚠ " : "◷ "}{text}</div>}
+      {item.disputeReason && (
+        <div style={{ color: "#c8c8d4" }}>
+          <span style={{ color: "#ef5b6b" }}>Problem raised:</span> {item.disputeReason}
+        </div>
+      )}
+      {resolution && (
+        <div style={{ color: "#c8c8d4" }}>
+          <span style={{ color: "#d8b24a" }}>{resolution}.</span>{item.resolutionNote ? ` “${item.resolutionNote}”` : ""}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// NOTIFICATIONS
+// ---------------------------------------------------------------------------
+// The bell sits in every header, so rather than thread `account` and a
+// navigate callback through each page, the app root provides them here.
+const NavContext = createContext({ account: null, go: () => {} });
+
+function NotificationBell() {
+  const { account, go } = useContext(NavContext);
+  const [data, setData] = useState({ notifications: [], unread: 0 });
+  const [open, setOpen] = useState(false);
+
+  async function load() {
+    try { setData(await api("GET", "/api/mk/notifications")); } catch (e) { /* transient */ }
+  }
+  // A minute is fine: nothing here is urgent to the second, and every open
+  // tab polls.
+  useEffect(() => {
+    if (!account) return;
+    load();
+    const iv = setInterval(load, 60_000);
+    return () => clearInterval(iv);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [account?.id]);
+
+  if (!account) return null;
+
+  async function openOne(n) {
+    setOpen(false);
+    if (!n.readAt) { try { setData(await api("POST", "/api/mk/notifications/read", { ids: [n.id] })); } catch (e) { /* ignore */ } }
+    if (n.view) go(n.view, { orderId: n.orderId });
+  }
+  async function readAll() {
+    try { setData(await api("POST", "/api/mk/notifications/read", {})); } catch (e) { /* ignore */ }
+  }
+
+  return (
+    <div style={{ position: "relative" }}>
+      <button onClick={() => { setOpen((o) => !o); if (!open) load(); }} style={{ ...navBtn, position: "relative" }}
+        title="Notifications" aria-label={`Notifications${data.unread ? ` (${data.unread} unread)` : ""}`}>
+        🔔{data.unread > 0 && (
+          <span style={{ position: "absolute", top: -6, right: -6, minWidth: 18, height: 18, padding: "0 5px", boxSizing: "border-box",
+            borderRadius: 999, background: "#ef5b6b", color: "#fff", fontSize: 11, lineHeight: "18px", textAlign: "center", fontWeight: 600 }}>
+            {data.unread > 9 ? "9+" : data.unread}
+          </span>
+        )}
+      </button>
+      {open && (<>
+        <div onClick={() => setOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 40 }} />
+        <div style={{ position: "absolute", right: 0, top: "calc(100% + 8px)", zIndex: 41, width: "min(360px, calc(100vw - 32px))",
+          maxHeight: 440, overflowY: "auto", background: "#15121d", border: "1px solid #33333e", borderRadius: 14,
+          boxShadow: "0 18px 50px rgba(0,0,0,0.55)", textAlign: "left" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 14px", borderBottom: "1px solid #24242e" }}>
+            <span style={{ fontSize: 12, letterSpacing: 1.5, textTransform: "uppercase", color: "#8a8a98" }}>Notifications</span>
+            {data.unread > 0 && <button onClick={readAll} style={{ background: "none", border: "none", color: "#d8b24a", cursor: "pointer", fontSize: 12, fontFamily: UI_FONT }}>Mark all read</button>}
+          </div>
+          {data.notifications.length === 0 && <div style={{ padding: 18, color: "#6c6c78", fontSize: 13 }}>Nothing yet.</div>}
+          {data.notifications.map((n) => (
+            <button key={n.id} onClick={() => openOne(n)} style={{ display: "block", width: "100%", textAlign: "left", font: "inherit",
+              cursor: "pointer", padding: "12px 14px", border: "none", borderBottom: "1px solid #1e1e28",
+              background: n.readAt ? "transparent" : "rgba(216,178,74,0.07)", color: "#e8e8f0" }}>
+              <div style={{ fontSize: 14, lineHeight: 1.4, fontWeight: n.readAt ? 400 : 600 }}>{n.title}</div>
+              {n.body && <div style={{ fontSize: 12, color: "#9a9aa8", marginTop: 3, lineHeight: 1.45, overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>{n.body}</div>}
+              <div style={{ fontSize: 11, color: "#6c6c78", marginTop: 4 }}>{fmtRelative(n.createdAt)}</div>
+            </button>
+          ))}
+        </div>
+      </>)}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// OPERATOR (ADMIN)
+// ---------------------------------------------------------------------------
+// Only reachable by accounts the server lists in ADMIN_EMAILS; the server
+// re-checks on every call, so hiding the button is cosmetic, not the guard.
+
+function AdminView({ onClose, account, onSignIn }) {
+  const [tab, setTab] = useState("applications");
+  const tabBtn = (id, label) => (
+    <button onClick={() => setTab(id)} style={{ ...navBtn, borderColor: tab === id ? "#d8b24a" : "#3a3a46", color: tab === id ? "#f3cf5b" : "#c8c8d4" }}>{label}</button>
+  );
+  return (
+    <MarketShell title="Admin" onClose={onClose} account={account} onSignIn={onSignIn}>
+      {!account?.isAdmin ? (
+        <EmptyState title="Not available" body="This page is for Side Quest operators." />
+      ) : (<>
+        <div style={{ display: "flex", gap: 9, marginBottom: 26, flexWrap: "wrap" }}>
+          {tabBtn("applications", "Creators")}
+          {tabBtn("disputes", "Disputes")}
+        </div>
+        {tab === "applications" ? <AdminCreators /> : <AdminDisputes account={account} />}
+      </>)}
+    </MarketShell>
+  );
+}
+
+const ADMIN_CREATOR_ACTIONS = {
+  applied: [["approved", "Approve", true], ["rejected", "Reject", false]],
+  approved: [["paused", "Pause storefront", false]],
+  paused: [["approved", "Reinstate", true]],
+  rejected: [["approved", "Approve after all", false]],
+};
+
+function AdminCreators() {
+  const [status, setStatus] = useState("applied");
+  const [data, setData] = useState(null);
+  const [notes, setNotes] = useState({});
+  const [busy, setBusy] = useState("");
+  const [err, setErr] = useState("");
+
+  async function load() {
+    try { setData(await api("GET", `/api/mk/admin/creators?status=${status}`)); setErr(""); }
+    catch (e) { setErr(e.message); setData({ creators: [], counts: {} }); }
+  }
+  useEffect(() => { setData(null); load(); /* eslint-disable-next-line */ }, [status]);
+
+  async function decide(c, next) {
+    setBusy(c.id); setErr("");
+    try {
+      await api("POST", `/api/mk/admin/creators/${c.id}/status`, { status: next, note: notes[c.id] || "" });
+      setNotes((n) => ({ ...n, [c.id]: "" }));
+      await load();
+    } catch (e) { setErr(e.message); }
+    setBusy("");
+  }
+
+  const counts = data?.counts || {};
+  return (<>
+    <div style={{ display: "flex", gap: 8, marginBottom: 20, flexWrap: "wrap" }}>
+      {["applied", "approved", "paused", "rejected"].map((s) => (
+        <button key={s} onClick={() => setStatus(s)} style={{ ...navBtn, fontSize: 12, padding: "6px 12px",
+          borderColor: status === s ? "#d8b24a" : "#2c2c36", color: status === s ? "#f3cf5b" : "#9a9aa8" }}>
+          {s === "applied" ? "Waiting for review" : s[0].toUpperCase() + s.slice(1)}{counts[s] ? ` (${counts[s]})` : ""}
+        </button>
+      ))}
+    </div>
+    {err && <div style={{ background: "rgba(239,91,107,0.12)", border: "1px solid #ef5b6b", color: "#ffc4cb", padding: "12px 16px", borderRadius: 10, marginBottom: 18, fontSize: 14 }}>⚠ {err}</div>}
+    {data === null ? <div style={{ color: "#6c6c78" }}>Loading…</div>
+      : data.creators.length === 0 ? <EmptyState title={status === "applied" ? "No applications waiting" : `No ${status} creators`} body="Nothing to do here right now." />
+      : data.creators.map((c) => (
+        <div key={c.id} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid #2c2c36", borderRadius: 16, padding: 20, marginBottom: 14 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "baseline" }}>
+            <div style={{ fontFamily: DISPLAY_FONT, fontSize: 19 }}>{c.displayName}</div>
+            <div style={{ color: "#8a8a98", fontSize: 12 }}>applied {fmtRelative(c.createdAt)}</div>
+          </div>
+          <div style={{ color: "#9a9aa8", fontSize: 13, marginTop: 4 }}>
+            {c.discipline === "artist" ? "Artist" : "Lore writer"} · {c.email} · {c.listingCount} listing{c.listingCount === 1 ? "" : "s"} drafted
+          </div>
+          {c.headline && <div style={{ fontSize: 14, marginTop: 10 }}>{c.headline}</div>}
+          {c.bio && <div style={{ color: "#c8c8d4", fontSize: 14, lineHeight: 1.6, marginTop: 6, whiteSpace: "pre-wrap" }}>{c.bio}</div>}
+          {(c.portfolio?.length > 0 || Object.keys(c.links || {}).length > 0) && (
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10 }}>
+              {[...(c.portfolio || []).map((u) => (typeof u === "string" ? u : u?.url)), ...Object.values(c.links || {})]
+                .filter((u) => typeof u === "string" && /^https?:\/\//.test(u))
+                .map((u, i) => <a key={i} href={u} target="_blank" rel="noopener noreferrer" style={{ color: "#d8b24a", fontSize: 13 }}>{u.replace(/^https?:\/\//, "").slice(0, 48)}</a>)}
+            </div>
+          )}
+          {c.reviewNote && <div style={{ color: "#8a8a98", fontSize: 13, marginTop: 10 }}>Last note: “{c.reviewNote}”</div>}
+          <input value={notes[c.id] || ""} onChange={(e) => setNotes((n) => ({ ...n, [c.id]: e.target.value }))}
+            placeholder="Note to the creator (optional — they'll see it)" style={{ ...inputStyle, marginTop: 14, marginBottom: 10 }} />
+          <div style={{ display: "flex", gap: 9, flexWrap: "wrap" }}>
+            {(ADMIN_CREATOR_ACTIONS[c.status] || []).map(([next, label, primary]) => primary
+              ? <PrimaryButton key={next} onClick={() => decide(c, next)} disabled={busy === c.id}>{label}</PrimaryButton>
+              : <GhostButton key={next} onClick={() => decide(c, next)} disabled={busy === c.id}>{label}</GhostButton>)}
+          </div>
+        </div>
+      ))}
+  </>);
+}
+
+function AdminDisputes({ account }) {
+  const [items, setItems] = useState(null);
+  const [open, setOpen] = useState("");
+  const [notes, setNotes] = useState({});
+  const [busy, setBusy] = useState("");
+  const [err, setErr] = useState("");
+
+  async function load() {
+    try { setItems((await api("GET", "/api/mk/admin/disputes")).items || []); setErr(""); }
+    catch (e) { setErr(e.message); setItems([]); }
+  }
+  useEffect(() => { load(); }, []);
+
+  async function resolve(it, outcome) {
+    setBusy(it.id); setErr("");
+    try {
+      const d = await api("POST", `/api/mk/admin/items/${it.id}/resolve`, { outcome, note: notes[it.id] || "" });
+      setItems(d.items || []);
+    } catch (e) { setErr(e.message); }
+    setBusy("");
+  }
+
+  const openOnes = (items || []).filter((x) => x.status === "disputed");
+  const closed = (items || []).filter((x) => x.status !== "disputed");
+  return (<>
+    {err && <div style={{ background: "rgba(239,91,107,0.12)", border: "1px solid #ef5b6b", color: "#ffc4cb", padding: "12px 16px", borderRadius: 10, marginBottom: 18, fontSize: 14 }}>⚠ {err}</div>}
+    {items === null ? <div style={{ color: "#6c6c78" }}>Loading…</div> : (<>
+      {openOnes.length === 0 && <EmptyState title="No open disputes" body="When a buyer raises a problem with a delivery, it lands here." />}
+      {openOnes.map((it) => (
+        <div key={it.id} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid #ef5b6b55", borderRadius: 16, padding: 20, marginBottom: 14 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "baseline" }}>
+            <div style={{ fontFamily: DISPLAY_FONT, fontSize: 19 }}>{it.title}</div>
+            <div style={{ color: "#f3cf5b", fontFamily: DISPLAY_FONT }}>{money(it.priceCents)}</div>
+          </div>
+          <div style={{ color: "#9a9aa8", fontSize: 13, marginTop: 4, lineHeight: 1.6 }}>
+            Buyer: {it.buyer.displayName || "—"} ({it.buyer.email}) · Creator: {it.creator?.displayName} ({it.creatorEmail})
+            <br />Raised {it.disputedAt ? fmtRelative(it.disputedAt) : "—"} · {it.revisionsUsed}/{it.revisionsIncluded} revisions used
+          </div>
+          <div style={{ marginTop: 12, padding: 12, borderRadius: 10, background: "rgba(239,91,107,0.08)", border: "1px solid #ef5b6b33" }}>
+            <div style={{ fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: "#ef5b6b", marginBottom: 5 }}>Buyer's complaint</div>
+            <div style={{ fontSize: 14, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{it.disputeReason || "(no reason recorded)"}</div>
+          </div>
+          {it.brief && (
+            <div style={{ marginTop: 10, padding: 12, borderRadius: 10, background: "rgba(0,0,0,0.25)", border: "1px solid #24242e" }}>
+              <div style={{ fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: "#8a8a98", marginBottom: 5 }}>Original brief</div>
+              <div style={{ fontSize: 14, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{it.brief}</div>
+            </div>
+          )}
+          <GhostButton onClick={() => setOpen(open === it.id ? "" : it.id)} style={{ marginTop: 12, padding: "8px 14px", fontSize: 13 }}>
+            {open === it.id ? "Hide deliveries & messages" : "Show deliveries & messages"}
+          </GhostButton>
+          {open === it.id && (
+            <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 12 }}>
+              <DeliveryHistory itemId={it.id} />
+              <ChatThread itemId={it.id} account={account} readOnly />
+            </div>
+          )}
+          <input value={notes[it.id] || ""} onChange={(e) => setNotes((n) => ({ ...n, [it.id]: e.target.value }))}
+            placeholder="Your decision, in a sentence — both sides will see it" style={{ ...inputStyle, marginTop: 14, marginBottom: 10 }} />
+          <div style={{ display: "flex", gap: 9, flexWrap: "wrap" }}>
+            <PrimaryButton onClick={() => resolve(it, "release")} disabled={busy === it.id}>Pay the creator</PrimaryButton>
+            <GhostButton onClick={() => resolve(it, "refund")} disabled={busy === it.id}>Refund the buyer</GhostButton>
+            <GhostButton onClick={() => resolve(it, "rework")} disabled={busy === it.id}>Send back for changes</GhostButton>
+          </div>
+        </div>
+      ))}
+      {closed.length > 0 && (<>
+        <div style={{ fontSize: 12, letterSpacing: 1.5, textTransform: "uppercase", color: "#8a8a98", margin: "30px 0 12px" }}>Resolved in the last 30 days</div>
+        {closed.map((it) => (
+          <div key={it.id} style={{ borderBottom: "1px solid #1e1e28", padding: "10px 0", fontSize: 14 }}>
+            <div>{it.title} · {money(it.priceCents)}</div>
+            <div style={{ color: "#8a8a98", fontSize: 13 }}>
+              {RESOLUTION_LABEL[it.resolution] || it.resolution}{it.resolvedAt ? ` · ${fmtRelative(it.resolvedAt)}` : ""}{it.resolutionNote ? ` · “${it.resolutionNote}”` : ""}
+            </div>
+          </div>
+        ))}
+      </>)}
+    </>)}
+  </>);
+}
+
+// Every version the creator sent, oldest first — what a dispute is judged on.
+function DeliveryHistory({ itemId }) {
+  const [list, setList] = useState(null);
+  useEffect(() => {
+    (async () => {
+      try { setList((await api("GET", `/api/mk/items/${itemId}/deliverables`)).deliverables || []); }
+      catch (e) { setList([]); }
+    })();
+  }, [itemId]);
+  if (list === null) return <div style={{ color: "#6c6c78", fontSize: 13 }}>Loading deliveries…</div>;
+  return (
+    <div style={{ border: "1px solid #2c2c36", borderRadius: 14, padding: 14 }}>
+      <div style={{ fontSize: 12, letterSpacing: 1.5, textTransform: "uppercase", color: "#8a8a98", marginBottom: 10 }}>Deliveries</div>
+      {list.length === 0 && <div style={{ color: "#6c6c78", fontSize: 13 }}>Nothing was delivered.</div>}
+      {list.map((d) => (
+        <div key={d.id} style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 13, color: "#c8c8d4" }}>Version {d.version} · {fmtWhen(d.createdAt)}{d.note ? ` — “${d.note}”` : ""}</div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 6 }}>
+            {(d.files || []).map((f, i) => (
+              <a key={i} href={f.url} target="_blank" rel="noopener noreferrer">
+                <img src={f.url} alt={f.name} style={{ height: 90, borderRadius: 8, border: "1px solid #33333e", display: "block" }} />
+              </a>
+            ))}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -2349,7 +2724,7 @@ function ReviewBox({ itemId }) {
 
 // Buyer's orders. Each order may span two creators, so items are listed
 // individually with their own state and their own conversation.
-function OrdersView({ onClose, account, onSignIn }) {
+function OrdersView({ onClose, account, onSignIn, initialOrderId }) {
   const [orders, setOrders] = useState(null);
   const [open, setOpen] = useState(null);   // full order detail
   const [err, setErr] = useState("");
@@ -2363,6 +2738,8 @@ function OrdersView({ onClose, account, onSignIn }) {
     catch (e) { setErr(e.message); }
   }
   useEffect(() => { if (account) load(); else setOrders([]); /* eslint-disable-next-line */ }, [account]);
+  // Arriving from a notification opens the order it's about.
+  useEffect(() => { if (account && initialOrderId) openOrder(initialOrderId); /* eslint-disable-next-line */ }, [account, initialOrderId]);
 
   return (
     <MarketShell title="Your orders" onClose={onClose} account={account} onSignIn={onSignIn}>
@@ -2436,6 +2813,7 @@ function MarketShell({ title, children, onClose, account, onSignIn }) {
         <div style={{ maxWidth: 900, margin: "0 auto", padding: "14px 24px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
           <div style={{ fontFamily: DISPLAY_FONT, fontSize: "clamp(11px,3vw,14px)", letterSpacing: "clamp(2px,1vw,5px)", textTransform: "uppercase", color: "#d8b24a" }}>✦ {title}</div>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <NotificationBell />
             {!account && <button onClick={onSignIn} style={navBtn}>Sign in</button>}
             <GhostButton onClick={onClose} style={{ padding: "8px 16px", fontSize: 13 }}>← Back</GhostButton>
           </div>
@@ -2680,6 +3058,7 @@ function ListingDetail({ id, onClose, account, onSignIn, onOrdered }) {
 }
 
 function Marketplace({ onClose, account, onSignIn, onBecomeCreator, onOrders }) {
+  const { go } = useContext(NavContext);
   const [discipline, setDiscipline] = useState("");
   const [kind, setKind] = useState("");
   const [listings, setListings] = useState(null);   // null = loading
@@ -2715,6 +3094,8 @@ function Marketplace({ onClose, account, onSignIn, onBecomeCreator, onOrders }) 
         <div style={{ maxWidth: 1040, margin: "0 auto", padding: "14px 24px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
           <div onClick={onClose} style={{ cursor: "pointer", fontFamily: DISPLAY_FONT, fontSize: "clamp(11px,3vw,14px)", letterSpacing: "clamp(2px,1vw,5px)", textTransform: "uppercase", color: "#d8b24a", whiteSpace: "nowrap" }}>✦ Side Quest</div>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <NotificationBell />
+            {account?.isAdmin && <button onClick={() => go("admin")} style={navBtn}>⚙ Admin</button>}
             {account && <button onClick={onOrders} style={navBtn}>◷ Orders</button>}
             <button onClick={onBecomeCreator} style={navBtn}>Sell your work</button>
             {!account && <button onClick={onSignIn} style={navBtn}>Sign in</button>}
@@ -2831,6 +3212,7 @@ function CreatorStudio({ onClose, account, onSignIn, onWork }) {
         <div style={{ maxWidth: 900, margin: "0 auto", padding: "14px 24px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
           <div style={{ fontFamily: DISPLAY_FONT, fontSize: "clamp(11px,3vw,14px)", letterSpacing: "clamp(2px,1vw,5px)", textTransform: "uppercase", color: "#d8b24a" }}>✦ Creator studio</div>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <NotificationBell />
             {account && <button onClick={onWork} style={navBtn}>◷ Incoming work</button>}
             <GhostButton onClick={onClose} style={{ padding: "8px 16px", fontSize: 13 }}>← Back</GhostButton>
           </div>
@@ -2887,7 +3269,10 @@ function CreatorStudio({ onClose, account, onSignIn, onWork }) {
                 <div style={{ color: "#9a9aa8", fontSize: 14, marginBottom: 4 }}>{DISCIPLINE_LABEL[c.discipline]} · {c.headline || "—"}</div>
                 {c.status !== "approved" && (
                   <div style={{ color: "#8a8a98", fontSize: 13, lineHeight: 1.6, marginTop: 10, paddingTop: 12, borderTop: "1px solid #24242e" }}>
-                    You can draft listings now. Publishing unlocks once your application is approved.
+                    {c.status === "applied" && "You can draft listings now. Publishing unlocks once your application is approved."}
+                    {c.status === "rejected" && "Your application wasn't approved this time. Your drafts are kept."}
+                    {c.status === "paused" && "Your storefront is paused — your listings are hidden from the marketplace for now. Orders already placed carry on as normal."}
+                    {c.reviewNote && <div style={{ color: "#c8c8d4", marginTop: 6 }}>Note from Side Quest: “{c.reviewNote}”</div>}
                   </div>
                 )}
 
@@ -2994,6 +3379,7 @@ function Landing({ onOpen, onDemo, savedCount, onDecks, banner, account, onSignI
               <button onClick={onDecks} style={{ ...navBtn, whiteSpace: "nowrap" }}>◈ My decks ({savedCount})</button>
             )}
             <button onClick={onMarket} style={{ ...navBtn, whiteSpace: "nowrap" }}>✦ Marketplace</button>
+            <NotificationBell />
             <AccountButton account={account} onSignIn={onSignIn} onSignOut={onSignOut} />
             <PrimaryButton onClick={onOpen} style={{ whiteSpace: "nowrap" }}>Open the app →</PrimaryButton>
           </div>

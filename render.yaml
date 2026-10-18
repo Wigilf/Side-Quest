@@ -25,6 +25,12 @@ services:
         sync: false            # sk_test_... — paste in dashboard
       - key: STRIPE_WEBHOOK_SECRET
         sync: false            # whsec_... — paste after creating the webhook
+      - key: ADMIN_EMAILS
+        sync: false            # your account's email — sign up first, then set this
+      - key: RESEND_API_KEY
+        sync: false            # optional: email copies of notifications
+      - key: EMAIL_FROM
+        sync: false            # optional: e.g. "Side Quest <hello@yourdomain.com>"
       - key: MAX_GENERATIONS_PER_DAY
         value: "500"
       - key: RATE_MAX

@@ -132,7 +132,7 @@ async function authSignup({ email, password, displayName }) {
   if ((await query("SELECT 1 FROM users WHERE email = $1", [email])).rows.length) throw httpErr(409, "email already registered");
   const id = crypto.randomUUID();
   await query("INSERT INTO users (id, email, password_hash, display_name) VALUES ($1, $2, $3, $4)", [id, email, hashPassword(password), displayName || null]);
-  return { user: { id, email, displayName: displayName || null }, token: await createSession(id) };
+  return { user: { id, email, displayName: displayName || null, isAdmin: ADMIN_EMAILS.has(email) }, token: await createSession(id) };
 }
 
 async function authLogin({ email, password }) {
@@ -141,7 +141,7 @@ async function authLogin({ email, password }) {
   const r = await query("SELECT id, email, password_hash, display_name FROM users WHERE email = $1", [email]);
   const u = r.rows[0];
   if (!u || !verifyPassword(password, u.password_hash)) throw httpErr(401, "invalid email or password");
-  return { user: { id: u.id, email: u.email, displayName: u.display_name }, token: await createSession(u.id) };
+  return { user: { id: u.id, email: u.email, displayName: u.display_name, isAdmin: ADMIN_EMAILS.has(u.email) }, token: await createSession(u.id) };
 }
 
 // ---- Marketplace: creators + listings -------------------------------------
@@ -165,7 +165,7 @@ function creatorRow(r) {
   return {
     id: r.id, discipline: r.discipline, displayName: r.display_name,
     headline: r.headline, bio: r.bio, portfolio: r.portfolio || [], links: r.links || {},
-    status: r.status, payoutsEnabled: r.payouts_enabled,
+    status: r.status, reviewNote: r.review_note || null, payoutsEnabled: r.payouts_enabled,
     ratingAvg: r.rating_avg == null ? null : Number(r.rating_avg), ratingCount: r.rating_count,
     createdAt: msOf(r.created_at),
   };
@@ -197,6 +197,10 @@ async function creatorApply(body, ctx) {
       [id, ctx.userId, discipline, displayName, body?.headline || null, body?.bio || null,
        JSON.stringify(body?.portfolio || []), JSON.stringify(body?.links || {})]
     );
+    for (const adminId of await adminUserIds()) {
+      await notify(adminId, { kind: "admin_application", view: "admin",
+        title: `New ${discipline} application: ${displayName}`, body: body?.headline || null });
+    }
     return { creator: creatorRow(r.rows[0]) };
   } catch (e) {
     // UNIQUE (user_id, discipline): the same person may sell as both an artist
@@ -400,7 +404,19 @@ const ITEM_TRANSITIONS = {
   accept_delivery:   { actor: "buyer",   from: ["delivered"],                       to: "accepted" },
   dispute:           { actor: "buyer",   from: ["delivered", "revision_requested"], to: "disputed" },
   cancel:            { actor: "buyer",   from: ["pending", "accepted_by_creator"],  to: "cancelled" },
+  // Once work has started the buyer can't walk away — unless the creator has
+  // blown the deadline. Then the promise is broken and so is the lock-in.
+  cancel_late:       { actor: "buyer",   from: ["accepted_by_creator", "in_progress", "revision_requested"], to: "cancelled", overdueOnly: true },
 };
+
+// The clock. Each of these moves stalled work along so an order can't sit
+// forever because one side stopped answering. All overridable per deployment.
+const RESPOND_HOURS = Number(process.env.MK_RESPOND_HOURS || 72);        // creator must accept/decline, or it auto-declines
+const DUE_REMINDER_HOURS = Number(process.env.MK_DUE_REMINDER_HOURS || 24); // nudge the creator this long before the deadline
+const REVISION_DAYS = Number(process.env.MK_REVISION_DAYS || 3);          // fresh time a revision request grants
+const AUTO_ACCEPT_DAYS = Number(process.env.MK_AUTO_ACCEPT_DAYS || 7);    // buyer silence after delivery counts as acceptance
+const AUTO_ACCEPT_WARN_HOURS = 48;                                         // warn the buyer this long before it does
+const OPEN_WORK = ["accepted_by_creator", "in_progress", "revision_requested"];
 
 function orderItemRow(r) {
   return {
@@ -413,6 +429,14 @@ function orderItemRow(r) {
     deliveredAt: r.delivered_at ? msOf(r.delivered_at) : null,
     acceptedAt: r.accepted_at ? msOf(r.accepted_at) : null,
     createdAt: msOf(r.created_at),
+    // Deadlines computed here rather than in the browser, so the dates a user
+    // is shown are the same ones the sweep will act on.
+    respondBy: r.status === "pending" ? msOf(r.created_at) + RESPOND_HOURS * 3600_000 : null,
+    autoAcceptAt: r.status === "delivered" && r.delivered_at ? msOf(r.delivered_at) + AUTO_ACCEPT_DAYS * 86400_000 : null,
+    overdue: !!(r.due_at && OPEN_WORK.includes(r.status) && msOf(r.due_at) < Date.now()),
+    disputeReason: r.dispute_reason || null,
+    resolution: r.resolution || null,
+    resolutionNote: r.resolution_note || null,
     ...(r.creator_name ? { creator: { id: r.creator_id, displayName: r.creator_name } } : {}),
   };
 }
@@ -469,13 +493,23 @@ async function orderCreate(body, ctx) {
     await query(
       `INSERT INTO mk_order_items
          (id, order_id, listing_id, creator_id, discipline, kind, title, price_cents,
-          creator_earnings_cents, revisions_included, brief, status, due_at)
+          creator_earnings_cents, revisions_included, brief, status, due_at, delivery_days)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending',
-               CASE WHEN $12::int IS NULL THEN NULL ELSE now() + ($12 || ' days')::interval END)`,
+               CASE WHEN $12::int IS NULL THEN NULL ELSE now() + ($12 || ' days')::interval END, $12)`,
       [crypto.randomUUID(), orderId, listing.id, listing.creator_id, listing.discipline, listing.kind,
        listing.title, listing.price_cents, split.creatorEarningsCents, listing.revisions_included,
        brief, listing.delivery_days]
     );
+  }
+  const created = await query(
+    `SELECT i.id, i.order_id, i.title, c.user_id AS creator_user_id FROM mk_order_items i
+       JOIN mk_creators c ON c.id = i.creator_id WHERE i.order_id = $1`, [orderId]);
+  for (const it of created.rows) {
+    await notify(it.creator_user_id, {
+      kind: "order_new", view: "work", orderId, itemId: it.id,
+      title: `New order: ${it.title}`,
+      body: `Accept or decline within ${RESPOND_HOURS} hours, or it is declined automatically.`,
+    });
   }
   return orderGet(orderId, ctx);
 }
@@ -517,7 +551,9 @@ async function ordersForCreator(ctx) {
 }
 
 // Resolve an item plus who the caller is relative to it.
-async function itemWithRole(itemId, ctx) {
+// `allowAdmin` lets an operator READ a thread they're adjudicating; it is never
+// passed on a write path, so an admin can't act as either party.
+async function itemWithRole(itemId, ctx, { allowAdmin = false } = {}) {
   const r = (await query(
     `SELECT i.*, o.buyer_id, c.user_id AS creator_user_id, c.display_name AS creator_name
        FROM mk_order_items i
@@ -525,7 +561,8 @@ async function itemWithRole(itemId, ctx) {
        JOIN mk_creators c ON c.id = i.creator_id
       WHERE i.id = $1`, [itemId])).rows[0];
   if (!r) throw httpErr(404, "not found");
-  const role = r.buyer_id === ctx.userId ? "buyer" : r.creator_user_id === ctx.userId ? "creator" : null;
+  let role = r.buyer_id === ctx.userId ? "buyer" : r.creator_user_id === ctx.userId ? "creator" : null;
+  if (!role && allowAdmin && await isAdmin(ctx)) role = "admin";
   if (!role) throw httpErr(404, "not found");
   return { item: r, role };
 }
@@ -547,28 +584,47 @@ async function itemTransition(itemId, action, body, ctx) {
   if (action === "request_revision" && item.revisions_used >= item.revisions_included) {
     throw httpErr(409, `all ${item.revisions_included} included revisions have been used`);
   }
+  if (rule.overdueOnly && !(item.due_at && msOf(item.due_at) < Date.now())) {
+    throw httpErr(409, "this work isn't overdue yet — you can cancel once the deadline passes");
+  }
+  const reason = String(body?.reason || "").trim().slice(0, 2000);
+  if (action === "dispute" && !reason) throw httpErr(422, "say what went wrong, so support can look into it");
 
   const sets = ["status = $2", "updated_at = now()"];
   const params = [itemId, rule.to, rule.from];
-  if (action === "deliver") sets.push("delivered_at = now()");
-  if (action === "request_revision") sets.push("revisions_used = revisions_used + 1");
+  // The delivery clock starts when the creator commits, not when the buyer
+  // orders — otherwise a creator who takes two days to accept has lost two
+  // days of their own deadline. Older rows lack delivery_days, so fall back to
+  // the span the original deadline implied.
+  if (action === "accept") {
+    sets.push(`due_at = CASE WHEN delivery_days IS NOT NULL THEN now() + delivery_days * interval '1 day'
+                             WHEN due_at IS NOT NULL THEN now() + (due_at - created_at) END`,
+              "due_reminded_at = NULL", "late_notified_at = NULL");
+  }
+  if (action === "deliver") sets.push("delivered_at = now()", "autoaccept_warned_at = NULL");
+  // A revision asked for after the deadline would otherwise be late the moment
+  // it's requested, which hands the buyer a free cancel.
+  if (action === "request_revision") {
+    sets.push("revisions_used = revisions_used + 1",
+              `due_at = CASE WHEN due_at IS NULL THEN NULL
+                             ELSE GREATEST(due_at, now() + ${REVISION_DAYS} * interval '1 day') END`,
+              "due_reminded_at = NULL", "late_notified_at = NULL");
+  }
   if (action === "accept_delivery") sets.push("accepted_at = now()");
+  if (action === "dispute") { sets.push("dispute_reason = $4", "disputed_at = now()"); params.push(reason); }
   // Re-check the source state inside the UPDATE, not just in the read above.
   // Two concurrent requests can both pass the check and then both write;
   // making the write conditional means the loser changes nothing and 409s.
+  const overdueGuard = rule.overdueOnly ? " AND due_at < now()" : "";
   const upd = await query(
-    `UPDATE mk_order_items SET ${sets.join(", ")} WHERE id = $1 AND status = ANY($3::text[])`, params);
+    `UPDATE mk_order_items SET ${sets.join(", ")} WHERE id = $1 AND status = ANY($3::text[])${overdueGuard}`, params);
   if (upd.rowCount === 0) throw httpErr(409, `cannot ${action.replace(/_/g, " ")} an item that is "${item.status}"`);
 
   if (action === "accept_delivery") {
-    // Acceptance is the release point. Recorded as two entries so "earned" and
-    // "paid out" stay separately auditable — a refund later posts a
-    // compensating entry rather than editing history.
-    await query(
-      `INSERT INTO mk_ledger (id, creator_id, order_id, order_item_id, kind, amount_cents, note)
-       VALUES ($1,$2,$3,$4,'earning',$5,'item accepted by buyer')`,
-      [crypto.randomUUID(), item.creator_id, item.order_id, item.id, item.creator_earnings_cents]
-    );
+    await postEarning(item, "item accepted by buyer");
+    await maybeCompleteOrder(item.order_id);
+  }
+  if (action === "decline" || action === "cancel" || action === "cancel_late") {
     await maybeCompleteOrder(item.order_id);
   }
   if (action === "dispute") {
@@ -576,22 +632,65 @@ async function itemTransition(itemId, action, body, ctx) {
       `INSERT INTO mk_ledger (id, creator_id, order_id, order_item_id, kind, amount_cents, note)
        VALUES ($1,$2,$3,$4,'adjustment',0,$5)`,
       [crypto.randomUUID(), item.creator_id, item.order_id, item.id,
-       `disputed by buyer: ${String(body?.reason || "").slice(0, 200)}`]
+       `disputed by buyer: ${reason.slice(0, 200)}`]
     );
     // Funds stay held. Neither released nor refunded until support decides —
     // auto-refunding is exploitable, and auto-releasing drives creators away.
   }
+  await notifyTransition(action, item, { reason });
   return orderGet(item.order_id, ctx);
 }
+
+// Acceptance is the release point. Recorded as two entries so "earned" and
+// "paid out" stay separately auditable — a refund later posts a
+// compensating entry rather than editing history.
+async function postEarning(item, note) {
+  await query(
+    `INSERT INTO mk_ledger (id, creator_id, order_id, order_item_id, kind, amount_cents, note)
+     VALUES ($1,$2,$3,$4,'earning',$5,$6)`,
+    [crypto.randomUUID(), item.creator_id, item.order_id, item.id, item.creator_earnings_cents, note]
+  );
+}
+
+// Who hears about each move. The actor never notifies themselves.
+async function notifyTransition(action, item, { reason } = {}) {
+  const t = item.title;
+  const toBuyer = (n) => notify(item.buyer_id, { view: "orders", orderId: item.order_id, itemId: item.id, ...n });
+  const toCreator = (n) => notify(item.creator_user_id, { view: "work", orderId: item.order_id, itemId: item.id, ...n });
+  switch (action) {
+    case "accept": return toBuyer({ kind: "item_accepted", title: `${item.creator_name} accepted "${t}"`, body: "Work will start shortly." });
+    case "decline": return toBuyer({ kind: "item_declined", title: `${item.creator_name} declined "${t}"`, body: "You won't be charged for this item." });
+    case "start": return toBuyer({ kind: "item_started", title: `Work has started on "${t}"` });
+    case "deliver": return toBuyer({ kind: "item_delivered", title: `"${t}" has been delivered`,
+      body: `Accept it, ask for a revision, or raise a problem. If you don't respond within ${AUTO_ACCEPT_DAYS} days it's accepted automatically.` });
+    case "request_revision": return toCreator({ kind: "revision_requested", title: `Revision requested on "${t}"` });
+    case "accept_delivery": return toCreator({ kind: "delivery_accepted", title: `"${t}" was accepted`, body: `You earned ${fmtMoney(item.creator_earnings_cents)}.` });
+    case "cancel": return toCreator({ kind: "item_cancelled", title: `The buyer cancelled "${t}"` });
+    case "cancel_late": return toCreator({ kind: "item_cancelled", title: `The buyer cancelled "${t}" after the deadline passed` });
+    case "dispute":
+      await toCreator({ kind: "item_disputed", title: `The buyer raised a problem with "${t}"`, body: "Support will review it. Payment is on hold until then." });
+      for (const adminId of await adminUserIds()) {
+        await notify(adminId, { kind: "admin_dispute", view: "admin", orderId: item.order_id, itemId: item.id,
+          title: `New dispute: "${t}"`, body: reason });
+      }
+  }
+}
+
+function fmtMoney(cents) { return `$${(cents / 100).toFixed(2)}`; }
 
 // The order is done only when every item is. Cancelled and declined items don't
 // block it — otherwise one creator declining would strand the whole order.
 async function maybeCompleteOrder(orderId) {
   const r = await query(
-    `SELECT count(*) FILTER (WHERE status NOT IN ('accepted','cancelled','declined')) AS open
+    `SELECT count(*) FILTER (WHERE status NOT IN ('accepted','cancelled','declined','refunded')) AS open,
+            count(*) FILTER (WHERE status = 'accepted') AS accepted,
+            count(*) FILTER (WHERE status = 'refunded') AS refunded
        FROM mk_order_items WHERE order_id = $1`, [orderId]);
-  if (Number(r.rows[0].open) === 0) {
-    await query(`UPDATE mk_orders SET status = 'completed', updated_at = now() WHERE id = $1`, [orderId]);
+  const { open, accepted, refunded } = r.rows[0];
+  if (Number(open) === 0) {
+    // An order where nothing was delivered isn't "completed" — it ended.
+    const status = Number(accepted) > 0 ? "completed" : Number(refunded) > 0 ? "refunded" : "cancelled";
+    await query(`UPDATE mk_orders SET status = $2, updated_at = now() WHERE id = $1`, [orderId, status]);
   }
 }
 
@@ -627,7 +726,7 @@ async function deliverableCreate(itemId, body, ctx) {
 
 async function deliverablesList(itemId, ctx) {
   requireDb(); requireUser(ctx);
-  await itemWithRole(itemId, ctx); // authorization only
+  await itemWithRole(itemId, ctx, { allowAdmin: true }); // authorization only
   const r = await query(
     `SELECT * FROM mk_deliverables WHERE order_item_id = $1 ORDER BY version`, [itemId]);
   return {
@@ -667,7 +766,7 @@ function messageRow(r) {
 
 async function messageSend(itemId, body, ctx) {
   requireDb(); requireUser(ctx);
-  const { item } = await itemWithRole(itemId, ctx);   // 404s for non-participants
+  const { item, role } = await itemWithRole(itemId, ctx);   // 404s for non-participants
   const text = String(body?.body || "").trim();
   const attachments = Array.isArray(body?.attachments) ? body.attachments.slice(0, 10) : [];
   if (!text && attachments.length === 0) throw httpErr(422, "message or attachment required");
@@ -692,12 +791,18 @@ async function messageSend(itemId, body, ctx) {
   const r = await query(
     `SELECT m.*, u.display_name AS sender_name FROM mk_messages m
        LEFT JOIN users u ON u.id = m.sender_id WHERE m.id = $1`, [id]);
+  const recipient = role === "buyer" ? item.creator_user_id : item.buyer_id;
+  await notify(recipient, {
+    kind: "message", view: role === "buyer" ? "work" : "orders", orderId: item.order_id, itemId,
+    title: `New message about "${item.title}"`, body: text ? text.slice(0, 200) : "Sent an image.",
+    collapse: true,
+  });
   return { message: messageRow(r.rows[0]) };
 }
 
 async function messagesList(itemId, q, ctx) {
   requireDb(); requireUser(ctx);
-  await itemWithRole(itemId, ctx);
+  const { role } = await itemWithRole(itemId, ctx, { allowAdmin: true });
   const since = Number(q.get("since")) || 0;
   const r = await query(
     `SELECT m.*, u.display_name AS sender_name FROM mk_messages m
@@ -707,8 +812,9 @@ async function messagesList(itemId, q, ctx) {
     [itemId, since]
   );
   // Reading the thread marks the other party's messages read. Cheap, and it's
-  // what makes an unread badge possible without a separate endpoint.
-  await query(
+  // what makes an unread badge possible without a separate endpoint. An
+  // operator reviewing a dispute is not the other party.
+  if (role !== "admin") await query(
     `UPDATE mk_messages SET read_at = now()
       WHERE order_item_id = $1 AND sender_id <> $2 AND read_at IS NULL`, [itemId, ctx.userId]);
   return { messages: r.rows.map(messageRow) };
@@ -818,6 +924,360 @@ async function reviewForItem(itemId, ctx) {
   await itemWithRole(itemId, ctx);
   const r = await query("SELECT rating, body FROM mk_reviews WHERE order_item_id = $1", [itemId]);
   return { review: r.rows[0] ? { rating: r.rows[0].rating, body: r.rows[0].body } : null };
+}
+
+// ---- Marketplace: notifications --------------------------------------------
+// Every event lands in an in-app inbox first; email is a best-effort copy.
+// That ordering means a missing email key, a bounced address or a provider
+// outage loses nothing — the bell still shows it.
+//
+// Email is sent with Resend's REST API (dependency-free, like the Stripe
+// calls). Without RESEND_API_KEY and EMAIL_FROM it is skipped and logged.
+
+const RESEND_API_KEY = process.env.RESEND_API_KEY || "";
+const EMAIL_FROM = process.env.EMAIL_FROM || "";
+
+function notificationRow(r) {
+  return {
+    id: r.id, kind: r.kind, title: r.title, body: r.body, view: r.view,
+    orderId: r.order_id, itemId: r.order_item_id,
+    createdAt: msOf(r.created_at), readAt: r.read_at ? msOf(r.read_at) : null,
+  };
+}
+
+// Never throws: a notification failing must not undo the action that caused
+// it — the buyer's acceptance is real whether or not the creator hears.
+// `collapse` folds repeats (chat) into one unread row per thread, so ten
+// messages are one ping rather than ten emails.
+async function notify(userId, { kind, title, body = null, view = null, orderId = null, itemId = null, collapse = false }) {
+  if (!userId || !dbEnabled()) return;
+  try {
+    if (collapse) {
+      const upd = await query(
+        `UPDATE mk_notifications SET body = $4, created_at = now()
+          WHERE user_id = $1 AND kind = $2 AND order_item_id = $3 AND read_at IS NULL`,
+        [userId, kind, itemId, body]);
+      if (upd.rowCount > 0) return;
+    }
+    const id = crypto.randomUUID();
+    await query(
+      `INSERT INTO mk_notifications (id, user_id, kind, title, body, view, order_id, order_item_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [id, userId, kind, title, body, view, orderId, itemId]);
+    emailNotification(id, userId, title, body).catch((e) => console.error("notification email:", e.message));
+  } catch (e) {
+    console.error("notify failed:", kind, e.message);
+  }
+}
+
+async function emailNotification(notificationId, userId, title, body) {
+  if (!RESEND_API_KEY || !EMAIL_FROM) return;
+  const u = (await query("SELECT email FROM users WHERE id = $1", [userId])).rows[0];
+  if (!u?.email) return;
+  const text = `${body ? body + "\n\n" : ""}Open Side Quest: ${SITE_URL}\n`;
+  const res = await fetchWithTimeout("https://api.resend.com/emails", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${RESEND_API_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ from: EMAIL_FROM, to: [u.email], subject: title, text }),
+  });
+  if (!res.ok) throw new Error(`Resend ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  await query("UPDATE mk_notifications SET emailed_at = now() WHERE id = $1", [notificationId]);
+}
+
+async function notificationsMine(ctx) {
+  requireDb(); requireUser(ctx);
+  const r = await query(
+    `SELECT * FROM mk_notifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 40`, [ctx.userId]);
+  const unread = (await query(
+    `SELECT count(*) AS n FROM mk_notifications WHERE user_id = $1 AND read_at IS NULL`, [ctx.userId])).rows[0].n;
+  return { notifications: r.rows.map(notificationRow), unread: Number(unread) };
+}
+
+// Mark some (by id) or all of the caller's notifications read.
+async function notificationsRead(body, ctx) {
+  requireDb(); requireUser(ctx);
+  const ids = Array.isArray(body?.ids) ? body.ids.map(String).slice(0, 100) : null;
+  await query(
+    `UPDATE mk_notifications SET read_at = now()
+      WHERE user_id = $1 AND read_at IS NULL AND ($2::text[] IS NULL OR id = ANY($2::text[]))`,
+    [ctx.userId, ids]);
+  return notificationsMine(ctx);
+}
+
+// ---- Marketplace: operator (admin) -----------------------------------------
+// Admins are named by email in ADMIN_EMAILS. There is no "make admin" button
+// anywhere in the product, so the only way to become one is to control the
+// server's environment.
+//
+// Signup doesn't verify email ownership, so an address listed here must
+// already have an account: otherwise whoever registers it first gets admin.
+
+const ADMIN_EMAILS = new Set((process.env.ADMIN_EMAILS || "")
+  .split(",").map((s) => s.trim().toLowerCase()).filter(Boolean));
+
+async function isAdmin(ctx) {
+  if (!ctx.userId || ADMIN_EMAILS.size === 0) return false;
+  if (ctx.isAdmin !== undefined) return ctx.isAdmin;
+  const r = await query("SELECT email FROM users WHERE id = $1", [ctx.userId]);
+  ctx.isAdmin = ADMIN_EMAILS.has(String(r.rows[0]?.email || "").toLowerCase());
+  return ctx.isAdmin;
+}
+
+async function requireAdmin(ctx) {
+  requireDb(); requireUser(ctx);
+  // 404 rather than 403: don't advertise that an admin surface exists.
+  if (!(await isAdmin(ctx))) throw httpErr(404, "not found");
+}
+
+async function adminUserIds() {
+  if (ADMIN_EMAILS.size === 0) return [];
+  const r = await query("SELECT id FROM users WHERE lower(email) = ANY($1::text[])", [[...ADMIN_EMAILS]]);
+  return r.rows.map((x) => x.id);
+}
+
+// Applications and the roster. `status` filters; default is the review queue.
+async function adminCreators(q, ctx) {
+  await requireAdmin(ctx);
+  const status = q.get("status") || "applied";
+  if (!["applied", "approved", "rejected", "paused"].includes(status)) throw httpErr(422, "bad status");
+  const r = await query(
+    `SELECT c.*, u.email,
+            (SELECT count(*) FROM mk_listings l WHERE l.creator_id = c.id AND l.status <> 'removed') AS listing_count
+       FROM mk_creators c JOIN users u ON u.id = c.user_id
+      WHERE c.status = $1 ORDER BY c.created_at ${status === "applied" ? "ASC" : "DESC"} LIMIT 200`, [status]);
+  const counts = (await query(`SELECT status, count(*) AS n FROM mk_creators GROUP BY status`)).rows;
+  return {
+    creators: r.rows.map((c) => ({ ...creatorRow(c), email: c.email, listingCount: Number(c.listing_count) })),
+    counts: Object.fromEntries(counts.map((x) => [x.status, Number(x.n)])),
+  };
+}
+
+// Pausing or rejecting a creator hides their listings immediately — browse
+// already requires an approved creator — without deleting anything, so
+// reinstating them brings the storefront back intact. Work already ordered
+// carries on: buyers who paid are owed it either way.
+const CREATOR_DECISIONS = {
+  approved: { from: ["applied", "rejected", "paused"], title: "You're approved to sell on Side Quest", body: "You can now publish your listings." },
+  rejected: { from: ["applied"], title: "Your Side Quest creator application", body: "We're not able to approve your application right now." },
+  paused: { from: ["approved"], title: "Your Side Quest storefront is paused", body: "Your listings are hidden from the marketplace for now." },
+};
+
+async function adminSetCreatorStatus(id, body, ctx) {
+  await requireAdmin(ctx);
+  const status = String(body?.status || "");
+  const rule = CREATOR_DECISIONS[status];
+  if (!rule) throw httpErr(422, "status must be approved, rejected or paused");
+  const note = String(body?.note || "").trim().slice(0, 1000) || null;
+  const r = await query(
+    `UPDATE mk_creators SET status = $2, review_note = $3, reviewed_at = now(), updated_at = now()
+      WHERE id = $1 AND status = ANY($4::text[]) RETURNING *`, [id, status, note, rule.from]);
+  if (!r.rows[0]) {
+    const cur = (await query("SELECT status FROM mk_creators WHERE id = $1", [id])).rows[0];
+    if (!cur) throw httpErr(404, "not found");
+    throw httpErr(409, `can't move a creator from "${cur.status}" to "${status}"`);
+  }
+  const c = r.rows[0];
+  await notify(c.user_id, { kind: `creator_${status}`, view: "studio", title: rule.title,
+    body: note ? `${rule.body}\n\n${note}` : rule.body });
+  return { creator: creatorRow(c) };
+}
+
+// Open disputes first, then the most recent decisions for reference.
+async function adminDisputes(ctx) {
+  await requireAdmin(ctx);
+  const r = await query(
+    `SELECT i.*, c.display_name AS creator_name, cu.email AS creator_email, bu.email AS buyer_email,
+            bu.display_name AS buyer_name
+       FROM mk_order_items i
+       JOIN mk_orders o ON o.id = i.order_id
+       JOIN users bu ON bu.id = o.buyer_id
+       JOIN mk_creators c ON c.id = i.creator_id
+       JOIN users cu ON cu.id = c.user_id
+      WHERE i.status = 'disputed'
+         OR (i.resolution IN ('released','refunded','rework') AND i.resolved_at > now() - interval '30 days')
+      ORDER BY (i.status = 'disputed') DESC, COALESCE(i.disputed_at, i.updated_at) DESC LIMIT 100`);
+  return {
+    items: r.rows.map((x) => ({
+      ...orderItemRow(x),
+      buyer: { email: x.buyer_email, displayName: x.buyer_name },
+      creatorEmail: x.creator_email,
+      disputedAt: x.disputed_at ? msOf(x.disputed_at) : null,
+      resolvedAt: x.resolved_at ? msOf(x.resolved_at) : null,
+    })),
+  };
+}
+
+// The three ways a dispute ends. Each is a deliberate human call: nothing in
+// the clock ever resolves a dispute on its own.
+const DISPUTE_OUTCOMES = {
+  release: { to: "accepted", buyer: "Support reviewed your dispute and released payment to the creator",
+             creator: "Support reviewed the dispute and released your payment" },
+  refund:  { to: "refunded", buyer: "Support reviewed your dispute and refunded you",
+             creator: "Support reviewed the dispute and refunded the buyer" },
+  rework:  { to: "revision_requested", buyer: "Support sent your order back to the creator for changes",
+             creator: "Support asked you to rework the delivery" },
+};
+
+async function adminResolveDispute(itemId, body, ctx) {
+  await requireAdmin(ctx);
+  const outcome = String(body?.outcome || "");
+  const o = DISPUTE_OUTCOMES[outcome];
+  if (!o) throw httpErr(422, "outcome must be release, refund or rework");
+  const note = String(body?.note || "").trim().slice(0, 2000) || null;
+  const resolution = { release: "released", refund: "refunded", rework: "rework" }[outcome];
+
+  const sets = ["status = $2", "resolution = $3", "resolution_note = $4", "resolved_at = now()", "updated_at = now()"];
+  if (outcome === "release") sets.push("accepted_at = now()");
+  // Rework doesn't spend one of the buyer's included revisions — support
+  // ordered it, the buyer didn't ask — but it does get a fresh deadline.
+  if (outcome === "rework") {
+    sets.push(`due_at = now() + ${REVISION_DAYS} * interval '1 day'`, "due_reminded_at = NULL", "late_notified_at = NULL");
+  }
+  const upd = await query(
+    `UPDATE mk_order_items SET ${sets.join(", ")} WHERE id = $1 AND status = 'disputed' RETURNING id`,
+    [itemId, o.to, resolution, note]);
+  if (upd.rowCount === 0) throw httpErr(409, "this item is not in dispute (already resolved?)");
+
+  const item = await itemParties(itemId);
+  if (outcome === "release") {
+    await postEarning(item, `dispute resolved in creator's favour${note ? `: ${note.slice(0, 150)}` : ""}`);
+  }
+  if (outcome === "refund") {
+    // Negative from the platform's side: money owed back out to the buyer.
+    // No card was charged yet (payments aren't live), so this is the record
+    // the refund will be executed from once they are.
+    await query(
+      `INSERT INTO mk_ledger (id, creator_id, order_id, order_item_id, kind, amount_cents, note)
+       VALUES ($1,$2,$3,$4,'refund',$5,$6)`,
+      [crypto.randomUUID(), item.creator_id, item.order_id, item.id, -item.price_cents,
+       `dispute resolved in buyer's favour${note ? `: ${note.slice(0, 150)}` : ""}`]);
+  }
+  if (outcome !== "rework") await maybeCompleteOrder(item.order_id);
+
+  const common = { kind: `dispute_${resolution}`, orderId: item.order_id, itemId: item.id, body: note };
+  await notify(item.buyer_id, { ...common, view: "orders", title: `${o.buyer}: "${item.title}"` });
+  await notify(item.creator_user_id, { ...common, view: "work", title: `${o.creator}: "${item.title}"` });
+  return adminDisputes(ctx);
+}
+
+// Item plus both parties' user ids, for code that runs without a caller.
+async function itemParties(itemId) {
+  return (await query(
+    `SELECT i.*, o.buyer_id, c.user_id AS creator_user_id, c.display_name AS creator_name
+       FROM mk_order_items i
+       JOIN mk_orders o ON o.id = i.order_id
+       JOIN mk_creators c ON c.id = i.creator_id
+      WHERE i.id = $1`, [itemId])).rows[0];
+}
+
+// ---- Marketplace: the deadline clock ---------------------------------------
+// A periodic sweep, not a job queue: the volumes are tiny and the deadlines
+// are measured in days, so "check every few minutes" is plenty. Every step is
+// a conditional UPDATE ... RETURNING, so the row it changes is the row it
+// notifies about, and a buyer pressing "accept" at the same moment as the
+// auto-accept can't produce a double earning — exactly one write wins.
+//
+// The sweep only runs while the server is awake. On a host that sleeps when
+// idle (Render's free tier), deadlines are enforced on the next wake rather
+// than to the minute — see DEPLOY.md.
+
+const SWEEP_INTERVAL_MS = Number(process.env.MK_SWEEP_INTERVAL_MS || 10 * 60_000);
+
+async function sweepDeadlines() {
+  if (!dbEnabled()) return { skipped: true };
+  const done = { autoDeclined: 0, dueReminders: 0, lateNotices: 0, autoAcceptWarnings: 0, autoAccepted: 0 };
+
+  // 1. Creator never answered. Decline on their behalf so the buyer isn't
+  //    left waiting on someone who isn't there.
+  const declined = await query(
+    `UPDATE mk_order_items SET status = 'declined', resolution = 'auto_declined', resolved_at = now(), updated_at = now()
+      WHERE status = 'pending' AND created_at < now() - $1 * interval '1 hour' RETURNING id`, [RESPOND_HOURS]);
+  for (const { id } of declined.rows) {
+    const it = await itemParties(id);
+    await maybeCompleteOrder(it.order_id);
+    await notify(it.buyer_id, { kind: "item_auto_declined", view: "orders", orderId: it.order_id, itemId: id,
+      title: `"${it.title}" was declined automatically`,
+      body: `${it.creator_name} didn't respond within ${RESPOND_HOURS} hours. You won't be charged for it.` });
+    await notify(it.creator_user_id, { kind: "item_auto_declined", view: "work", orderId: it.order_id, itemId: id,
+      title: `You missed an order: "${it.title}"`,
+      body: `Orders are declined automatically if you don't respond within ${RESPOND_HOURS} hours.` });
+    done.autoDeclined++;
+  }
+
+  // 2. Deadline approaching.
+  const soon = await query(
+    `UPDATE mk_order_items SET due_reminded_at = now()
+      WHERE status = ANY($1::text[]) AND due_at IS NOT NULL AND due_reminded_at IS NULL
+        AND due_at > now() AND due_at < now() + $2 * interval '1 hour' RETURNING id`, [OPEN_WORK, DUE_REMINDER_HOURS]);
+  for (const { id } of soon.rows) {
+    const it = await itemParties(id);
+    await notify(it.creator_user_id, { kind: "item_due_soon", view: "work", orderId: it.order_id, itemId: id,
+      title: `"${it.title}" is due within ${DUE_REMINDER_HOURS} hours` });
+    done.dueReminders++;
+  }
+
+  // 3. Deadline passed. Nothing changes state — the buyer decides whether to
+  //    wait or cancel — but both sides are told, once.
+  const late = await query(
+    `UPDATE mk_order_items SET late_notified_at = now()
+      WHERE status = ANY($1::text[]) AND due_at IS NOT NULL AND due_at < now() AND late_notified_at IS NULL
+      RETURNING id`, [OPEN_WORK]);
+  for (const { id } of late.rows) {
+    const it = await itemParties(id);
+    await notify(it.creator_user_id, { kind: "item_overdue", view: "work", orderId: it.order_id, itemId: id,
+      title: `"${it.title}" is overdue`, body: "The buyer can now cancel. Deliver as soon as you can, or message them." });
+    await notify(it.buyer_id, { kind: "item_overdue", view: "orders", orderId: it.order_id, itemId: id,
+      title: `"${it.title}" is past its deadline`, body: "You can keep waiting, or cancel without penalty." });
+    done.lateNotices++;
+  }
+
+  // 4. Delivered and the buyer has gone quiet: warn before auto-accepting.
+  const warn = await query(
+    `UPDATE mk_order_items SET autoaccept_warned_at = now()
+      WHERE status = 'delivered' AND autoaccept_warned_at IS NULL
+        AND delivered_at < now() - ($1 * interval '1 day') + ($2 * interval '1 hour') RETURNING id`,
+    [AUTO_ACCEPT_DAYS, AUTO_ACCEPT_WARN_HOURS]);
+  for (const { id } of warn.rows) {
+    const it = await itemParties(id);
+    await notify(it.buyer_id, { kind: "item_autoaccept_soon", view: "orders", orderId: it.order_id, itemId: id,
+      title: `"${it.title}" will be accepted automatically soon`,
+      body: `If you need changes, ask within ${AUTO_ACCEPT_WARN_HOURS} hours.` });
+    done.autoAcceptWarnings++;
+  }
+
+  // 5. Auto-accept. Without this, a buyer who never clicks means a creator
+  //    who never gets paid.
+  const accepted = await query(
+    `UPDATE mk_order_items SET status = 'accepted', accepted_at = now(), resolution = 'auto_accepted',
+            resolved_at = now(), updated_at = now()
+      WHERE status = 'delivered' AND delivered_at < now() - $1 * interval '1 day' RETURNING id`, [AUTO_ACCEPT_DAYS]);
+  for (const { id } of accepted.rows) {
+    const it = await itemParties(id);
+    await postEarning(it, `auto-accepted after ${AUTO_ACCEPT_DAYS} days without a response`);
+    await maybeCompleteOrder(it.order_id);
+    await notify(it.creator_user_id, { kind: "item_auto_accepted", view: "work", orderId: it.order_id, itemId: id,
+      title: `"${it.title}" was accepted`, body: `The buyer didn't respond within ${AUTO_ACCEPT_DAYS} days, so it was accepted automatically. You earned ${fmtMoney(it.creator_earnings_cents)}.` });
+    await notify(it.buyer_id, { kind: "item_auto_accepted", view: "orders", orderId: it.order_id, itemId: id,
+      title: `"${it.title}" was accepted automatically` });
+    done.autoAccepted++;
+  }
+  return done;
+}
+
+let sweeping = false;
+async function runSweep() {
+  if (sweeping) return null;   // one at a time; a slow sweep shouldn't stack
+  sweeping = true;
+  try {
+    const r = await sweepDeadlines();
+    if (Object.values(r).some((n) => n > 0)) console.log("deadline sweep:", JSON.stringify(r));
+    return r;
+  } catch (e) {
+    console.error("deadline sweep failed:", e.message);
+    return null;
+  } finally {
+    sweeping = false;
+  }
 }
 
 // ---- Deck persistence (replaces the client's localStorage shim) ------------
@@ -1499,6 +1959,7 @@ const routes = {
       return { ok: chk.ok, ...(chk.ok ? {} : { reason: chk.reason }), ...(c.publicLooksLikeApi ? { publicUrlIsApiEndpoint: true } : {}) };
     })(),
     db: dbEnabled(),
+    email: !!(RESEND_API_KEY && EMAIL_FROM),
     model: ANTHROPIC_MODEL,
     imageModel: GEMINI_IMAGE_MODEL,
   }),
@@ -1510,7 +1971,7 @@ const routes = {
     requireUser(ctx);
     const r = await query("SELECT id, email, display_name FROM users WHERE id = $1", [ctx.userId]);
     if (!r.rows.length) throw httpErr(401, "sign in required");
-    return { user: { id: r.rows[0].id, email: r.rows[0].email, displayName: r.rows[0].display_name } };
+    return { user: { id: r.rows[0].id, email: r.rows[0].email, displayName: r.rows[0].display_name, isAdmin: ADMIN_EMAILS.has(String(r.rows[0].email).toLowerCase()) } };
   },
   "GET /api/decks": async (b, ctx) => decksList(ctx),
   "POST /api/decks": async (b, ctx) => deckSave(ctx, b),
@@ -1601,6 +2062,15 @@ const server = http.createServer(async (req, res) => {
       else if (req.method === "POST" && p === "/api/mk/orders") result = await orderCreate(body, ctx);
       else if (req.method === "GET" && p === "/api/mk/orders") result = await ordersMine(ctx);
       else if (req.method === "GET" && p === "/api/mk/work") result = await ordersForCreator(ctx);
+      // Notifications
+      else if (req.method === "GET" && p === "/api/mk/notifications") result = await notificationsMine(ctx);
+      else if (req.method === "POST" && p === "/api/mk/notifications/read") result = await notificationsRead(body, ctx);
+      // Operator
+      else if (req.method === "GET" && p === "/api/mk/admin/creators") result = await adminCreators(q, ctx);
+      else if (req.method === "POST" && (m = p.match(/^\/api\/mk\/admin\/creators\/([^/]+)\/status$/))) result = await adminSetCreatorStatus(decodeURIComponent(m[1]), body, ctx);
+      else if (req.method === "GET" && p === "/api/mk/admin/disputes") result = await adminDisputes(ctx);
+      else if (req.method === "POST" && (m = p.match(/^\/api\/mk\/admin\/items\/([^/]+)\/resolve$/))) result = await adminResolveDispute(decodeURIComponent(m[1]), body, ctx);
+      else if (req.method === "POST" && p === "/api/mk/admin/sweep") { await requireAdmin(ctx); result = { sweep: await runSweep() }; }
       else if (req.method === "GET" && (m = p.match(/^\/api\/mk\/orders\/([^/]+)$/))) result = await orderGet(decodeURIComponent(m[1]), ctx);
       // Order-item lifecycle — every transition through one funnel.
       else if (req.method === "POST" && (m = p.match(/^\/api\/mk\/items\/([^/]+)\/review$/))) result = await reviewCreate(decodeURIComponent(m[1]), body, ctx);
@@ -1659,7 +2129,13 @@ server.listen(PORT, () => {
   console.log(`  DATABASE_URL:      ${process.env.DATABASE_URL ? "set" : "MISSING"}`);
   if (dbEnabled()) {
     migrate()
-      .then(() => console.log("  DB migrations: OK"))
+      .then(() => {
+        console.log("  DB migrations: OK");
+        // Catch up on anything that fell due while the server was asleep,
+        // then keep checking while it's awake.
+        runSweep();
+        setInterval(runSweep, SWEEP_INTERVAL_MS).unref();
+      })
       .catch((e) => console.error("  DB migrations FAILED:", e.message));
   }
 });

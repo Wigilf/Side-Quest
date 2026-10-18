@@ -90,6 +90,23 @@ and logged by the webhook; turning that into a shipped deck is the next step in
 
 ---
 
+## Marketplace operations
+
+- **Admin access.** Sign up on the live site with your own email, *then* set
+  `ADMIN_EMAILS` to that address on Render. An "⚙ Admin" button appears in the
+  marketplace header: approve/reject/pause creators, and settle disputes
+  (pay the creator, refund the buyer, or send back for changes).
+- **Notifications** always appear in-app (the 🔔 in every header). Email copies
+  are sent only when `RESEND_API_KEY` and `EMAIL_FROM` are set.
+- **The deadline clock** (auto-decline unanswered orders after 72h, deadline
+  reminders, overdue notices, auto-accept 7 days after delivery) runs inside the
+  backend every 10 minutes **while it is awake**. Render's free tier sleeps after
+  ~15 idle minutes, so deadlines are enforced on the next wake, not to the
+  minute. Anything that keeps the server awake (a paid instance, or an uptime
+  pinger hitting `/api/health`) makes it punctual.
+
+---
+
 ## Security notes (important)
 
 - A public single-page app **cannot hide a secret** — anything in the frontend

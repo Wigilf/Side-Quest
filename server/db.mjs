@@ -306,4 +306,71 @@ async function migrateMarketplace() {
   // Marketplace-built decks record who made what, for provenance labelling.
   await query(`ALTER TABLE sq_decks ADD COLUMN IF NOT EXISTS order_id text`).catch(() => {});
   await query(`ALTER TABLE sq_decks ADD COLUMN IF NOT EXISTS art_provenance text`).catch(() => {});
+
+  await migrateOperations();
+}
+
+// ---------------------------------------------------------------------------
+// OPERATIONS: curation, disputes, deadlines, notifications
+// ---------------------------------------------------------------------------
+// The parts of the marketplace that run without either party pressing a
+// button: an operator approving creators and settling disputes, and a clock
+// that moves stalled work along.
+async function migrateOperations() {
+  await query(`
+    -- Why an application was approved, rejected or paused. Shown back to the
+    -- creator, so a rejection is never silent.
+    ALTER TABLE mk_creators ADD COLUMN IF NOT EXISTS review_note text;
+    ALTER TABLE mk_creators ADD COLUMN IF NOT EXISTS reviewed_at timestamptz;
+
+    -- Snapshotted from the listing like price is, so the deadline can restart
+    -- when the creator accepts without consulting a listing they may have edited.
+    ALTER TABLE mk_order_items ADD COLUMN IF NOT EXISTS delivery_days int;
+    -- A dispute is adjudicated on its stated reason, so it gets a column rather
+    -- than living only in a ledger note.
+    ALTER TABLE mk_order_items ADD COLUMN IF NOT EXISTS dispute_reason text;
+    ALTER TABLE mk_order_items ADD COLUMN IF NOT EXISTS disputed_at timestamptz;
+    -- How an item was closed when nobody pressed the normal button:
+    -- released / refunded / rework (operator), auto_declined / auto_accepted (clock).
+    ALTER TABLE mk_order_items ADD COLUMN IF NOT EXISTS resolution text;
+    ALTER TABLE mk_order_items ADD COLUMN IF NOT EXISTS resolution_note text;
+    ALTER TABLE mk_order_items ADD COLUMN IF NOT EXISTS resolved_at timestamptz;
+    -- One-shot flags so the deadline sweep sends each reminder exactly once.
+    ALTER TABLE mk_order_items ADD COLUMN IF NOT EXISTS due_reminded_at timestamptz;
+    ALTER TABLE mk_order_items ADD COLUMN IF NOT EXISTS late_notified_at timestamptz;
+    ALTER TABLE mk_order_items ADD COLUMN IF NOT EXISTS autoaccept_warned_at timestamptz;
+
+    -- In-app inbox. Email is a copy of a row here, not the other way round, so
+    -- nothing is lost when email isn't configured or a send fails.
+    CREATE TABLE IF NOT EXISTS mk_notifications (
+      id text PRIMARY KEY,
+      user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      kind text NOT NULL,
+      title text NOT NULL,
+      body text,
+      -- Where clicking it should go: 'work' | 'orders' | 'admin' | 'studio'.
+      view text,
+      order_id text,
+      order_item_id text REFERENCES mk_order_items(id) ON DELETE CASCADE,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      read_at timestamptz,
+      emailed_at timestamptz
+    );
+    CREATE INDEX IF NOT EXISTS notifications_user_idx ON mk_notifications(user_id, created_at DESC);
+  `);
+
+  // An operator refund needs a terminal state of its own: 'cancelled' would
+  // hide that the work was delivered and then disputed. Widening a CHECK means
+  // replacing it, so only do that when the current one predates 'refunded'.
+  const c = (await query(
+    `SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint
+      WHERE conname = 'mk_order_items_status_check'`)).rows[0];
+  if (!c || !c.def.includes("refunded")) {
+    await query(`
+      ALTER TABLE mk_order_items DROP CONSTRAINT IF EXISTS mk_order_items_status_check;
+      ALTER TABLE mk_order_items ADD CONSTRAINT mk_order_items_status_check
+        CHECK (status IN ('pending','accepted_by_creator','in_progress','delivered',
+                          'revision_requested','accepted','declined','cancelled','disputed','refunded'));
+    `);
+  }
 }
