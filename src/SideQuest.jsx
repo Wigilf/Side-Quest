@@ -454,7 +454,7 @@ function isTransient(e) {
 const postJSON = async (pathname, body) => {
   const out = await api("POST", pathname, body);
   if (Array.isArray(out?.brandNotice) && out.brandNotice.length) {
-    window.dispatchEvent(new CustomEvent("sq:brand-notice", { detail: out.brandNotice }));
+    window.dispatchEvent(new CustomEvent("sq:brand-notice", { detail: { lines: out.brandNotice, keys: out.brandKeys || [] } }));
   }
   return out;
 };
@@ -1281,6 +1281,12 @@ export default function SideQuest() {
   const [genState, setGenState] = useState("idle");
   const [error, setError] = useState("");
   const [brandSwaps, setBrandSwaps] = useState([]);
+  // For each franchise swapped this session, the distinct texts it came
+  // from. Named again in new words (a rewritten quest, a fresh art note) means
+  // the user is trying on purpose, so the banner explains why and how to get
+  // close without it. The same text resent — a lore redo — doesn't count.
+  const brandSources = useRef(new Map());
+  const [brandInsist, setBrandInsist] = useState(false);
   const [busyCard, setBusyCard] = useState(null);
   const [orderPlaced, setOrderPlaced] = useState(false);
   const [photoConsent, setPhotoConsent] = useState(false);
@@ -1310,7 +1316,16 @@ export default function SideQuest() {
   }
   useEffect(() => { refreshDecks(); }, []);
   useEffect(() => {
-    const onSwap = (e) => setBrandSwaps((prev) => [...new Set([...prev, ...e.detail])]);
+    const onSwap = (e) => {
+      setBrandSwaps((prev) => [...new Set([...prev, ...e.detail.lines])]);
+      for (const key of e.detail.keys) {
+        const [franchise, source] = key.split("|");
+        const seen = brandSources.current.get(franchise) || new Set();
+        seen.add(source);
+        brandSources.current.set(franchise, seen);
+        if (seen.size >= 2) setBrandInsist(true);
+      }
+    };
     window.addEventListener("sq:brand-notice", onSwap);
     return () => window.removeEventListener("sq:brand-notice", onSwap);
   }, []);
@@ -1962,6 +1977,12 @@ export default function SideQuest() {
             <div style={{ flex: 1 }}>
               ✦ We made this an original world so your deck can be printed: {brandSwaps.join(" · ")}.
               <div style={{ fontSize: 12, color: "#b9a978", marginTop: 4 }}>Side Quest can't print other people's characters or brands, so we keep the vibe and invent the rest.</div>
+              {brandInsist && (
+                <div style={{ fontSize: 13, color: "#f3e3b0", marginTop: 10, lineHeight: 1.5 }}>
+                  <b>Asking again won't bring the name back.</b> Film, game and book characters belong to the studios that made them, and we print and ship real decks, so we can't put them on cards — however the request is worded.
+                  <div style={{ marginTop: 6 }}>What does work: describe the look instead of naming it. "Silver armour, a glowing blue energy sword, a long dark cape" or "round glasses and a wizard's wand" are all fine — just not someone else's character.</div>
+                </div>
+              )}
             </div>
             <button type="button" onClick={() => setBrandSwaps([])} aria-label="Dismiss" style={{ background: "none", border: "none", color: "#b9a978", cursor: "pointer", fontSize: 16 }}>✕</button>
           </div>
