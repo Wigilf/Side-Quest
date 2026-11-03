@@ -2228,6 +2228,10 @@ async function callGeminiImage(parts) {
 // Character portrait from a real face (photoDataUrl: "data:image/jpeg;base64,…").
 // The art counterpart of NO_FRANCHISE_RULE: costume and setting are invented,
 // never a franchise's recognisable outfit, emblem or prop.
+// The site draws the card around the picture. Gemini was seen painting a full
+// card anyway (frame, title bar, a cost symbol, "1/3"), which is both a broken
+// card and a Magic look-alike, so spell out every part it must leave out.
+const ARTWORK_ONLY = "Artwork only, edge to edge: no card frame, border, title bar or banner, no cost, mana or stat symbols, no numbers, no text, no watermark.";
 const ART_ORIGINALITY = "Costume, props, emblems and setting must be entirely original: nothing recognisable from any film, TV show, game, comic or anime, and no logos.";
 
 async function generatePortrait({ photoDataUrl, themeStyle, lore, refineNote, house = "" }) {
@@ -2244,7 +2248,7 @@ async function generatePortrait({ photoDataUrl, themeStyle, lore, refineNote, ho
     `(${typeLine}), fully in costume and in-world. Fully painted/illustrated — NOT a ` +
     `photograph and NOT a plain headshot. Style: ${styleBrief(themeStyle)}. Heroic ` +
     `head-and-shoulders hero framing, dramatic lighting, rich thematic background. ` +
-    `Keep their recognizable likeness. No text, no card border, no watermark. ` +
+    `Keep their recognizable likeness. ${ARTWORK_ONLY} ` +
     `${ART_ORIGINALITY}${refineNote ? " Art direction: " + refineNote : ""}${house}`.trim();
 
   return callGeminiImage([{ inline_data: { mime_type: mimeType, data }, }, { text: prompt }]);
@@ -2270,8 +2274,8 @@ async function generateObjectArt({ themeStyle, lore, refineNote, category, house
   const prompt =
     `Paint an ORIGINAL trading-card illustration for "${title}" — a ${typeLine}. ${subject} ` +
     `Fully painted/illustrated — NOT a photograph. Style: ${styleBrief(themeStyle)}. Iconic ` +
-    `centered composition, dramatic lighting, rich thematic background. No text, no card ` +
-    `border, no watermark. ${ART_ORIGINALITY}${refineNote ? " Art direction: " + refineNote : ""}${house}`.trim();
+    `centered composition, dramatic lighting, rich thematic background. ${ARTWORK_ONLY} ` +
+    `${ART_ORIGINALITY}${refineNote ? " Art direction: " + refineNote : ""}${house}`.trim();
 
   return callGeminiImage([{ text: prompt }]);
 }
@@ -2443,7 +2447,8 @@ async function handleStripeEvent(event) {
 // building decks, but it shouldn't silently wave everything through either.
 const BRAND_GUARD_MODEL = process.env.BRAND_GUARD_MODEL || ANTHROPIC_MODEL;
 const BRAND_FALLBACK = [
-  [/\bstar\s*wars\b|\bjedi\b|\bsith\b|\blight\s*sabers?\b|\bdarth\s+\w+/gi, "space opera"],
+  [/\blight\s*sabers?\b/gi, "glowing energy sword"],
+  [/\bstar\s*wars\b|\bjedi\b|\bsith\b|\bdarth\s+\w+/gi, "space opera"],
   [/\bharry\s+pott?er\b|\bhogwarts\b|\bquidditch\b|\bsorting\s+(?:hat|cap)\b|\bmuggles?\b/gi, "wizard school"],
   [/\blord\s+of\s+the\s+rings\b|\bsignore\s+degli\s+anelli\b|\bhobbits?\b|\bmordor\b|\bgandalf\b|\bmiddle[\s-]earth\b/gi, "high fantasy"],
   [/\bmagic:?\s*the\s+gathering\b|\bmtg\b|\bpok[eé]mon\b|\bpocket\s+monsters?\b|\bpikachu\b|\byu-?gi-?oh\b|\bhearthstone\b/gi, "fantasy card game"],
@@ -2459,12 +2464,26 @@ function brandFallback(text) {
   return { text: out, found };
 }
 
-// Art needs a stricter rule than text. Describing a franchise's signature
-// items paints them anyway: "a dark armored warlord with a red energy blade
-// before a planet-killing battle station" came back as Darth Vader in all but
-// name. So in an art note they are removed, not translated.
+// Art notes get a finer rule than "swap the names". The law protects names
+// and trademarked terms ("Darth Vader", "lightsaber") and a character's
+// distinctive design, not genre tropes: a glowing energy sword, a space
+// station, a wizard's staff are everyone's. So names go, tropes stay in a
+// generic form, and the one thing refused is stacking a franchise's tropes
+// until they rebuild a specific character. A first, blunter version turned
+// "a dark armored warlord with a red energy blade before a planet-killing
+// battle station" into Darth Vader in all but name; removing every trope
+// instead cost too much of what the user asked for.
 const BRAND_ART_RULE = `
-This text is an ART NOTE for a portrait. Here, stricter: when it asks to look like a franchise character or to include a franchise's signature items (weapons, vehicles, ships, costumes, helmets, masks, emblems, creatures), REMOVE them entirely rather than describing them, and do not substitute look-alikes (no "energy blade" for a lightsaber, no "armored helmet" for Vader's). Keep only what is not tied to the franchise (age, mood, expression, general colours, pose) and add at most a plain genre word ("space opera", "fantasy"). "replacement" is what you put in its place, or "removed".`;
+This text is an ART NOTE for a card portrait. Apply the rule with nuance:
+1. Names and coined terms of a franchise always go: character and place names, and trademark-like invented words ("lightsaber", "Jedi", "Hogwarts", "Pokéball"). Replace a coined term with its plain generic description ("lightsaber" -> "glowing energy sword").
+2. Generic genre tropes stay, in generic form: energy swords, blasters, spaceships, space stations, robots, capes, armour, wands, staffs, robes, dragons, elves, pirates, masks in general. If the user asked for one, they get it.
+3. A specific character's DISTINCTIVE DESIGN is never reproduced: when the user asks to look like a named character, keep only the broad archetype ("like Darth Vader" -> "an imposing dark-armoured commander") and drop that character's signature features (Vader's black dome helmet, breathing mask and chest control panel; Harry Potter's lightning-bolt scar; Pikachu's red cheeks). Plain items that merely appear in a franchise (round glasses, a black cape) are fine.
+4. Do not stack: never keep so many tropes from the same franchise that together they rebuild one specific character or scene. When the note names a character, keep the broad archetype plus at most ONE of the tropes the user asked for, give that one a detail that differs from the franchise's version, and remove the rest.
+Examples:
+- "exactly like Darth Vader with a red lightsaber and the Death Star behind" -> "an imposing armoured commander holding a glowing blue energy sword" (archetype + one trope; colour changed; station removed)
+- "Harry Potter look: round glasses, lightning scar and a wand" -> "a scholarly wizard holding a carved wand" (glasses and scar removed: with a wand they rebuild him)
+- "give him a lightsaber" -> "give him a glowing energy sword" (no character named: the trope stays)
+"replacement" is what you put in its place, or "removed".`;
 
 async function brandGuard(text, { keepNames = [], art = false } = {}) {
   const input = String(text || "").trim();
