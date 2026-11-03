@@ -448,7 +448,16 @@ function isTransient(e) {
   if (e?.status === 502) return !/^Art service/.test(msg);
   return /timeout|failed to fetch|network/i.test(msg);
 }
-const postJSON = (pathname, body) => api("POST", pathname, body);
+// The server swaps franchise names for originals before generating (see its
+// brand guard) and says so in `brandNotice`. Announced from here so every
+// generator reports it without each caller having to remember.
+const postJSON = async (pathname, body) => {
+  const out = await api("POST", pathname, body);
+  if (Array.isArray(out?.brandNotice) && out.brandNotice.length) {
+    window.dispatchEvent(new CustomEvent("sq:brand-notice", { detail: out.brandNotice }));
+  }
+  return out;
+};
 
 // Anonymous per-device owner token — identifies "my decks" without a login.
 // Small string in localStorage (no quota issue); an account can claim it later.
@@ -1271,6 +1280,7 @@ export default function SideQuest() {
   const [editingUid, setEditingUid] = useState(null); // uid of card open in the enlarge/edit modal
   const [genState, setGenState] = useState("idle");
   const [error, setError] = useState("");
+  const [brandSwaps, setBrandSwaps] = useState([]);
   const [busyCard, setBusyCard] = useState(null);
   const [orderPlaced, setOrderPlaced] = useState(false);
   const [photoConsent, setPhotoConsent] = useState(false);
@@ -1299,6 +1309,11 @@ export default function SideQuest() {
     } catch (e) { /* offline / no decks yet — fine */ }
   }
   useEffect(() => { refreshDecks(); }, []);
+  useEffect(() => {
+    const onSwap = (e) => setBrandSwaps((prev) => [...new Set([...prev, ...e.detail])]);
+    window.addEventListener("sq:brand-notice", onSwap);
+    return () => window.removeEventListener("sq:brand-notice", onSwap);
+  }, []);
 
   // ---- Accounts -----------------------------------------------------------
   // Restore the session on load. A stored token that no longer resolves is
@@ -1620,7 +1635,7 @@ export default function SideQuest() {
 
   async function runGeneration(override) {
     const src = override || { eventType: eventType || "an event", theme, questPrompt: fullQuest(), participants, categories };
-    setError(""); setGenState("lore"); setStep(3); setFlipped({});
+    setError(""); setBrandSwaps([]); setGenState("lore"); setStep(3); setFlipped({});
     try {
       // --- Lore: live Claude call, with a baked-in fallback for stage safety ---
       let lore;
@@ -1941,6 +1956,15 @@ export default function SideQuest() {
       <div style={{ maxWidth: 1040, margin: "0 auto", padding: "26px 20px 0" }}>
         {error && (
           <div style={{ background: "rgba(239,91,107,0.12)", border: "1px solid #ef5b6b", color: "#ffc4cb", padding: "12px 16px", borderRadius: 10, marginBottom: 20, fontSize: 14 }}>⚠ {error}</div>
+        )}
+        {brandSwaps.length > 0 && (
+          <div style={{ display: "flex", gap: 12, alignItems: "flex-start", background: "rgba(216,178,74,0.10)", border: "1px solid #d8b24a", color: "#f3e3b0", padding: "12px 16px", borderRadius: 10, marginBottom: 20, fontSize: 14 }}>
+            <div style={{ flex: 1 }}>
+              ✦ We made this an original world so your deck can be printed: {brandSwaps.join(" · ")}.
+              <div style={{ fontSize: 12, color: "#b9a978", marginTop: 4 }}>Side Quest can't print other people's characters or brands, so we keep the vibe and invent the rest.</div>
+            </div>
+            <button type="button" onClick={() => setBrandSwaps([])} aria-label="Dismiss" style={{ background: "none", border: "none", color: "#b9a978", cursor: "pointer", fontSize: 16 }}>✕</button>
+          </div>
         )}
 
         {/* STEP 0: QUEST (world + occasion + description) */}
